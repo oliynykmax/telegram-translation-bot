@@ -157,7 +157,7 @@ async def handle_discussion_message(update: Update, context: ContextTypes.DEFAUL
 
     # Reply to this message as a comment
     try:
-        await message.reply_text(f"English translation:\n\n{translated}")
+        await message.reply_text(translated)
         logger.info("Translation posted as comment")
     except Exception as e:
         logger.error(f"Failed to post translation comment: {e}")
