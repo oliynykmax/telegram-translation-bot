@@ -53,6 +53,15 @@ def translate_to_english(text: str) -> str:
         if lang == "en":
             return None
 
+        from deep_translator import DeeplTranslator
+
+        translator = DeeplTranslator(api_key=DEEPL_API_KEY, use_free_api=True)
+        result = translator.translate(text, target_lang="EN", source_lang=lang.upper())
+        return result
+    except Exception as e:
+        logger.error(f"Translation error: {e}")
+        return None
+
         from deep_translator.deepl import DeepL
 
         translator = DeepL(api_key=DEEPL_API_KEY, use_free_api=True)
