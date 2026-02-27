@@ -9,7 +9,6 @@ from telegram.ext import (
     ContextTypes,
 )
 from telegram.ext.filters import UpdateType
-from deep_translator import deepl
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DEEPL_API_KEY = os.getenv("DEEPL_API_KEY")
@@ -54,9 +53,10 @@ def translate_to_english(text: str) -> str:
         if lang == "en":
             return None
 
-        result = deepl.translate(
-            text, target_lang="EN", source_lang=lang.upper(), api_key=DEEPL_API_KEY
-        )
+        from deep_translator.deepl import DeepL
+
+        translator = DeepL(api_key=DEEPL_API_KEY, use_free_api=True)
+        result = translator.translate(text, target_lang="EN", source_lang=lang.upper())
         return result
     except Exception as e:
         logger.error(f"Translation error: {e}")
