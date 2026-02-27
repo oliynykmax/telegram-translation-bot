@@ -14,6 +14,7 @@ from deep_translator import deepl
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DEEPL_API_KEY = os.getenv("DEEPL_API_KEY")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
+SOURCE_CHANNEL_ID = int(os.getenv("SOURCE_CHANNEL_ID", "0"))
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -65,6 +66,9 @@ def translate_to_english(text: str) -> str:
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post
     if not message or not message.text:
+        return
+
+    if message.chat.id != SOURCE_CHANNEL_ID:
         return
 
     text = message.text
