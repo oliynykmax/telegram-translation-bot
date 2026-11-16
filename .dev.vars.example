@@ -1,4 +1,5 @@
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+TELEGRAM_WEBHOOK_SECRET=random_string_of_A-Z_a-z_0-9_-_up_to_256_chars
 DEEPL_API_KEY=your_deepl_api_key
 CHANNEL_ID=-1001234567890
 DISCUSSION_GROUP_ID=-1001234567891

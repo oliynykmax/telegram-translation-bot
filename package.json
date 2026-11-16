@@ -1,0 +1,20 @@
+{
+  "name": "telegram-translation-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types",
+    "check": "wrangler types --check && tsc --noEmit && tsc --noEmit -p scripts",
+    "test": "vitest run",
+    "webhook": "bun scripts/webhook.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.8.3",
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0",
+    "wrangler": "4.163.0"
+  }
+}
