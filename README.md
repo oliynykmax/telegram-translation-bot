@@ -1,15 +1,18 @@
 # Telegram Channel Translation Bot
 
-Translates Ukrainian channel posts and their comments to English with DeepL. Each translation is posted as a reply in the channel's linked discussion group. It runs as the Cloudflare Worker `tg-translator` at `https://tg-translator.oliinyk.dev`, driven by a Telegram webhook.
+Translates Ukrainian channel posts and their comments to English with DeepL. Each post's thread is shown as one picture in the channel's linked discussion group: the translated post, then every comment with the writer's name and profile photo. The bot edits that picture in place as comments arrive. It runs as the Cloudflare Worker `tg-translator` at `https://tg-translator.oliinyk.dev`, driven by a Telegram webhook.
 
 ## Behavior
 
-- Telegram auto-forwards each channel post into the discussion group. When a message there comes from `CHANNEL_ID`, the Worker translates its text or caption (`UK` to `EN-US`) and replies to it.
-- Comments are translated too. A comment is any message in the discussion group that sits in a post's comment thread (`message_thread_id` or `reply_to_message` is set) and is not the channel's automatic forward. Comments sent by anonymous admins or as the channel count. DeepL gets the thread as `context`, which is not billed and resolves short references such as "the tomato" meaning the Pomodoro technique. A direct comment sends the post it replies to. A reply to another comment sends the channel post and that comment, because Telegram leaves the post out of nested replies. Channel post text is kept in the `thread_posts` table for this. Comment text is never stored. The translation replies to the comment. Plain group messages outside a thread are ignored.
+- Telegram auto-forwards each channel post into the discussion group. When the forward comes from `CHANNEL_ID`, the Worker stores the post in `thread_posts`. If the post is Ukrainian, it translates the text or caption (`UK` to `EN-US`) and replies with the thread picture.
+- A comment is any message in a post's comment thread (`message_thread_id` or `reply_to_message` is set) that is not the channel's automatic forward. Comments sent by anonymous admins or as the channel count, under the chat's name. A Ukrainian comment is translated and added to the picture, which is created at that point if the post was not Ukrainian. Comments in other languages are added as written, but only to a picture that already exists. Plain group messages outside a thread are ignored, and so are comments under posts from before the bot stored them.
+- DeepL gets the thread as `context`, which is not billed and resolves short references such as "the tomato" meaning the Pomodoro technique. A direct comment sends the post it replies to. A reply to another comment sends the channel post and that comment, because Telegram leaves the post out of nested replies.
+- The picture is HTML (`src/thread-image.ts`) rendered by Cloudflare Browser Rendering (`src/browser.ts`). It reuses a kept-alive browser session, because the plan limits how many new browsers start per minute. A render takes about 1 to 4.5 seconds. It shows the newest 30 comments and clips long texts so the image stays within Telegram's photo limits. Times are Kyiv time.
+- Translated comments are stored in `thread_comments` so the picture can be redrawn. Profile photos are cached in `profiles` for a week. A version counter on each thread makes requests that run at once keep redrawing until the picture shows the latest comment.
 - Posts and comments that are mostly Latin script (over 80%) are skipped. So are messages that are not Ukrainian by the original Cyrillic heuristic (`src/language.ts`). Text-less messages and messages older than `MESSAGE_MAX_AGE_SECONDS` (default 300) are skipped too.
 - `/start` in any chat replies "Bot is running!".
 - Only requests that carry the webhook secret in `X-Telegram-Bot-Api-Secret-Token` are processed. Everything else gets 401.
-- Each post is claimed in D1 (`posts` table) before translating, so a redelivered update never posts twice. Network errors, 429 and 5xx from DeepL or Telegram are retried in-request up to 3 times, honoring `Retry-After` and Telegram's `retry_after` up to 5 seconds. If retries run out, the claim is released and the Worker answers 503, so Telegram redelivers the update. Permanent errors (other 4xx, such as DeepL quota 456 or a reply over Telegram's 4096-character limit) are recorded as `failed` with the error and acknowledged with 200.
+- Each post is claimed in D1 (`posts` table) before translating, so a redelivered update never posts twice. Network errors, 429 and 5xx from DeepL or Telegram are retried in-request up to 3 times, honoring `Retry-After` and Telegram's `retry_after` up to 5 seconds. If retries run out, the claim is released and the Worker answers 503, so Telegram redelivers the update. A failed render (for example the browser rate limit) is transient too. Permanent errors (other 4xx, such as DeepL quota 456) are recorded as `failed` with the error and acknowledged with 200.
 
 ## Development
 
@@ -67,7 +70,8 @@ Rollback: `bun run webhook delete` removes the webhook, after which a polling bo
 
 ## Limitations
 
-- Translations longer than 4096 characters are not split. Telegram rejects them and the post is recorded as `failed`, as the Python bot also failed to send them.
+- Edited and deleted comments are not reflected, because the webhook only subscribes to new messages.
+- The text in the picture cannot be selected or searched in Telegram.
 - `/start@otherbot` also triggers the reply, because the bot's username is not checked.
-- Rows in `posts` and `thread_posts` are never pruned. A `posts` row is a few dozen bytes per translated message, and a `thread_posts` row holds one channel post's text.
-- If the D1 write that marks a post `done` fails after Telegram accepted the reply, a later redelivery (after the 60-second claim lease) could post the translation again.
+- Rows in `posts`, `thread_posts`, `thread_comments` and `profiles` are never pruned.
+- If the D1 write that marks a post `done` fails after Telegram accepted the reply, a later redelivery (after the 60-second claim lease) could send the thread picture again.
