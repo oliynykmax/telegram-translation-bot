@@ -1,6 +1,6 @@
 # Telegram Channel Translation Bot
 
-Translates Ukrainian channel posts and their comments to English with DeepL. Each post's thread is shown as one picture in the channel's linked discussion group: the translated post, then every comment with the writer's name and profile photo. The bot edits that picture in place as comments arrive. It runs as the Cloudflare Worker `tg-translator` at `https://tg-translator.oliinyk.dev`, driven by a Telegram webhook.
+Translates Ukrainian channel posts and their comments to English with DeepL. Each post's thread is shown as one picture in the channel's linked discussion group: the translated post, then every comment with the writer's name and profile photo. The bot edits that picture in place as comments arrive or are edited. It runs as the Cloudflare Worker `tg-translator` at `https://tg-translator.oliinyk.dev`, driven by a Telegram webhook.
 
 ## Behavior
 
@@ -69,7 +69,7 @@ The previous version was a Python long-polling bot (`python main.py`) on Railway
    bun run webhook set --drop-pending
    ```
 
-   `--drop-pending` discards the queued backlog. The polling bot got the same effect by ignoring messages sent before it started. It only subscribes to `message` updates.
+   `--drop-pending` discards the queued backlog. The polling bot got the same effect by ignoring messages sent before it started. It subscribes to `message` and `edited_message` updates. Run `set` again after changing the subscribed updates. Telegram has no call that changes them alone, and `setWebhook` needs the secret, so a lost secret means storing a new one with `wrangler secret put` first.
 4. Post a short Ukrainian test message in the channel and watch `bunx wrangler tail tg-translator`. Expect a `translation_posted` log line and an English comment under the post.
 5. Delete the Railway project when the Worker has run cleanly for a while.
 
@@ -77,7 +77,9 @@ Rollback: `bun run webhook delete` removes the webhook, after which a polling bo
 
 ## Limitations
 
-- Edited and deleted comments are not reflected, because the webhook only subscribes to new messages.
+- Deleted comments stay in the picture, because Telegram does not tell bots about deletions.
+- Edited direct messages are not translated again.
+- A comment whose text is removed by an edit (a caption deleted from a photo) keeps its old text.
 - The text in the picture cannot be selected or searched in Telegram.
 - Text is laid out without kerning or complex-script shaping. That suits English and Ukrainian.
 - `/start@otherbot` also triggers the reply, because the bot's username is not checked.

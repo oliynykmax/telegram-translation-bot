@@ -18,6 +18,8 @@ export interface Comment {
   authorName: string;
   text: string;
   date: number;
+  /** Edit time of this text, 0 for the original. */
+  editedAt: number;
 }
 
 export interface Profile {
@@ -29,18 +31,26 @@ export interface Profile {
 
 const PHOTO_LEASE_SECONDS = 60;
 
+/**
+ * Stores the post's text. An edit replaces an older text and clears its translation,
+ * so the picture shows the new text until the new translation is in.
+ */
 export async function rememberThreadPost(
   db: D1Database,
   chatId: number,
   postId: number,
   text: string,
   date: number,
+  editedAt = 0,
 ) {
   await db
     .prepare(
-      "INSERT INTO thread_posts (chat_id, message_id, text, created_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
+      `INSERT INTO thread_posts (chat_id, message_id, text, created_at, edited_at) VALUES (?1, ?2, ?3, ?4, ?5)
+       ON CONFLICT DO UPDATE SET text = excluded.text, translation = NULL, edited_at = excluded.edited_at,
+         version = version + 1
+       WHERE excluded.edited_at > thread_posts.edited_at`,
     )
-    .bind(chatId, postId, text, date)
+    .bind(chatId, postId, text, date, editedAt)
     .run();
 }
 
@@ -72,23 +82,30 @@ export async function getThread(db: D1Database, chatId: number, postId: number) 
   } satisfies Thread;
 }
 
-export async function setTranslation(db: D1Database, thread: Thread, translation: string) {
+/** Stores the translation of `source`, unless an edit changed the post in the meantime. */
+export async function setTranslation(db: D1Database, thread: Thread, source: string, translation: string) {
   await db
     .prepare(
-      "UPDATE thread_posts SET translation = ?3, version = version + 1 WHERE chat_id = ?1 AND message_id = ?2",
+      `UPDATE thread_posts SET translation = ?4, version = version + 1
+       WHERE chat_id = ?1 AND message_id = ?2 AND text = ?3`,
     )
-    .bind(thread.chatId, thread.postId, translation)
+    .bind(thread.chatId, thread.postId, source, translation)
     .run();
 }
 
-/** Upserts the comment and bumps the thread version, so an in-flight render redraws. */
+/**
+ * Upserts the comment and bumps the thread version, so an in-flight render redraws.
+ * A text from an older edit than the stored one is ignored, whichever arrives last.
+ */
 export async function saveComment(db: D1Database, thread: Thread, comment: Comment) {
   await db.batch([
     db
       .prepare(
-        `INSERT INTO thread_comments (chat_id, message_id, thread_id, author_id, author_name, text, date)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT (chat_id, message_id) DO UPDATE SET text = excluded.text, author_name = excluded.author_name`,
+        `INSERT INTO thread_comments (chat_id, message_id, thread_id, author_id, author_name, text, date, edited_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT (chat_id, message_id) DO UPDATE
+           SET text = excluded.text, author_name = excluded.author_name, edited_at = excluded.edited_at
+           WHERE excluded.edited_at >= thread_comments.edited_at`,
       )
       .bind(
         thread.chatId,
@@ -98,6 +115,7 @@ export async function saveComment(db: D1Database, thread: Thread, comment: Comme
         comment.authorName,
         comment.text,
         comment.date,
+        comment.editedAt,
       ),
     db
       .prepare("UPDATE thread_posts SET version = version + 1 WHERE chat_id = ?1 AND message_id = ?2")
@@ -108,17 +126,25 @@ export async function saveComment(db: D1Database, thread: Thread, comment: Comme
 export async function listComments(db: D1Database, thread: Thread): Promise<Comment[]> {
   const { results } = await db
     .prepare(
-      `SELECT message_id, author_id, author_name, text, date FROM thread_comments
+      `SELECT message_id, author_id, author_name, text, date, edited_at FROM thread_comments
        WHERE chat_id = ?1 AND thread_id = ?2 ORDER BY date, message_id`,
     )
     .bind(thread.chatId, thread.postId)
-    .all<{ message_id: number; author_id: number; author_name: string; text: string; date: number }>();
+    .all<{
+      message_id: number;
+      author_id: number;
+      author_name: string;
+      text: string;
+      date: number;
+      edited_at: number;
+    }>();
   return results.map((r) => ({
     messageId: r.message_id,
     authorId: r.author_id,
     authorName: r.author_name,
     text: r.text,
     date: r.date,
+    editedAt: r.edited_at,
   }));
 }
 
