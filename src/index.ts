@@ -80,24 +80,30 @@ async function handleMessage(env: Env, deps: Deps, message: Message): Promise<Re
   if (message.chat.type !== "supergroup" || message.chat.id !== groupId) {
     return text(200, "ignored");
   }
-  const isPost = message.sender_chat?.id === channelId;
+  // Bots never receive other bots' group messages, so `from.is_bot` only marks anonymous
+  // admins (GroupAnonymousBot) and comments sent as the channel. Those are comments too.
+  const isPost = message.is_automatic_forward === true && message.sender_chat?.id === channelId;
   const isComment =
-    !isPost &&
-    !message.from?.is_bot &&
-    (message.message_thread_id !== undefined || message.reply_to_message !== undefined);
-  if (!isPost && !isComment) return text(200, "ignored");
+    !isPost && (message.message_thread_id !== undefined || message.reply_to_message !== undefined);
+  if (!isPost && !isComment) {
+    log("group_message_ignored", { message_id: message.message_id, sender_chat: message.sender_chat?.id });
+    return text(200, "ignored");
+  }
 
+  const kind = isPost ? "post" : "comment";
   const maxAge = Number(env.MESSAGE_MAX_AGE_SECONDS);
   if (deps.now() - message.date > maxAge) {
-    log("post_too_old", { message_id: message.message_id, age: deps.now() - message.date });
+    log("too_old", { kind, message_id: message.message_id, age: deps.now() - message.date });
     return text(200, "too old");
   }
 
   const source = message.text ?? message.caption;
   if (!source) return text(200, "no text");
   if (isPost) await rememberThreadPost(env.DB, groupId, message.message_id, source, deps.now());
-  if (isEnglish(source)) return text(200, "english");
-  if (!isUkrainian(source)) return text(200, "not ukrainian");
+  if (isEnglish(source) || !isUkrainian(source)) {
+    log("not_ukrainian", { kind, message_id: message.message_id });
+    return text(200, "not ukrainian");
+  }
 
   const context = isComment ? await commentContext(env.DB, message) : undefined;
   return translatePost(env, deps, message, source, context);

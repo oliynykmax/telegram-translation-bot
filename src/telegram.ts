@@ -5,7 +5,7 @@ export interface Message {
   date: number;
   chat: { id: number; type: string };
   sender_chat?: { id: number };
-  from?: { id: number; is_bot: boolean };
+  is_automatic_forward?: boolean;
   message_thread_id?: number;
   reply_to_message?: { message_id: number; text?: string; caption?: string };
   text?: string;

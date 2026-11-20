@@ -176,7 +176,7 @@ describe("translation", () => {
     ["posts without text", { text: undefined }],
     ["posts older than the age window", { date: NOW - 301 }],
     ["group messages outside a comment thread", { sender_chat: undefined, from: { id: 5, is_bot: false } }],
-    ["comments from bots", { ...comment(), from: { id: 6, is_bot: true } }],
+    ["channel messages that are not automatic forwards or in a thread", { is_automatic_forward: undefined }],
     ["English comments", { ...comment(), text: "Great post, thanks for sharing!" }],
     ["other chats", { chat: { id: -100999, type: "supergroup" } }],
   ])("skips %s", async (_, overrides) => {
@@ -223,6 +223,16 @@ describe("translation", () => {
     const nested = comment({ reply_to_message: { message_id: 49, text: "Та ні, це ж не сині" } });
     await handleRequest(webhook(channelPost(nested)), env, fake.deps);
     expect(fake.deepl()[0].body.context).toBe(`Post: ${post}\nComment: Та ні, це ж не сині`);
+  });
+
+  it.each([
+    ["an anonymous group admin", { from: { id: 1087968824, is_bot: true }, sender_chat: { id: GROUP, type: "supergroup" } }],
+    ["the channel itself", { from: { id: 136817688, is_bot: true }, sender_chat: { id: CHANNEL, type: "channel" } }],
+  ])("translates a comment sent as %s without storing it as a post", async (_, sender) => {
+    const fake = fakeDeps(healthyRoute);
+    await handleRequest(webhook(channelPost(comment(sender))), env, fake.deps);
+    expect(fake.telegram()[0].body.reply_parameters).toEqual({ message_id: 50 });
+    expect(await env.DB.prepare("SELECT count(*) n FROM thread_posts").first("n")).toBe(0);
   });
 
   it("ignores edited messages and non-message updates", async () => {
