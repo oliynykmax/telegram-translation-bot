@@ -3,11 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "build:wasm": "cd render && cargo build --release --target wasm32-unknown-unknown && cp target/wasm32-unknown-unknown/release/thread_render.wasm ../src/thread-render.wasm",
+    "dev": "bun run build:wasm && wrangler dev",
+    "deploy": "bun run build:wasm && wrangler deploy",
     "types": "wrangler types",
-    "check": "wrangler types --check && tsc --noEmit && tsc --noEmit -p scripts",
-    "test": "vitest run",
+    "check": "wrangler types --check && tsc --noEmit && tsc --noEmit -p scripts && cd render && cargo test --release --quiet",
+    "test": "bun run build:wasm && vitest run",
     "webhook": "bun scripts/webhook.ts"
   },
   "devDependencies": {
@@ -16,8 +17,5 @@
     "typescript": "^7.0.2",
     "vitest": "^5.1.0",
     "wrangler": "4.163.0"
-  },
-  "dependencies": {
-    "@cloudflare/puppeteer": "1.4.0"
   }
 }

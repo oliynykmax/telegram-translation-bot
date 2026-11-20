@@ -1,5 +1,5 @@
 import { editPhoto, profilePhoto, sendPhoto } from "./telegram";
-import { threadHtml, type Author } from "./thread-image";
+import { threadImage, type Author } from "./thread-image";
 import {
   claimPhoto,
   getProfiles,
@@ -43,7 +43,7 @@ async function renderThread(env: Env, deps: Deps, thread: Thread): Promise<Upstr
     { id: channelId, name: channelName },
     ...shown.map((c) => ({ id: c.authorId, name: c.authorName })),
   ]);
-  const html = threadHtml({
+  const input = threadImage({
     channel: authors.get(channelId)!,
     post: { text: thread.translation ?? thread.text, date: thread.postDate },
     comments: shown.map((c) => ({
@@ -54,9 +54,10 @@ async function renderThread(env: Env, deps: Deps, thread: Thread): Promise<Upstr
     hiddenComments: comments.length - shown.length,
   });
   try {
-    return { ok: true, value: await deps.render(html) };
+    return { ok: true, value: deps.render(input) };
   } catch (error) {
-    return { ok: false, transient: true, detail: `render: ${error instanceof Error ? error.message : error}` };
+    // Rendering is deterministic, so a retry would fail the same way.
+    return { ok: false, transient: false, detail: `render: ${error instanceof Error ? error.message : error}` };
   }
 }
 

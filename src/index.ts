@@ -1,6 +1,6 @@
-import { renderPng } from "./browser";
 import { translateToEnglish } from "./deepl";
 import { isEnglish, isUkrainian } from "./language";
+import { renderPng } from "./render";
 import { claimPost, releasePost, settlePost } from "./posts";
 import { authorOf, isStartCommand, parseMessage, reply, type Message } from "./telegram";
 import { syncThreadPhoto } from "./thread-photo";
@@ -18,12 +18,12 @@ export const WEBHOOK_PATH = "/telegram/webhook";
 export const START_REPLY =
   "Bot is running! I translate Ukrainian channel posts and their comments to English, as one picture per post that updates as people comment.";
 
-const liveDeps = (env: Env): Deps => ({
+const liveDeps: Deps = {
   fetch: (input, init) => fetch(input, init),
   sleep: (ms) => scheduler.wait(ms),
   now: () => Math.floor(Date.now() / 1000),
-  render: (html) => renderPng(env.BROWSER, html),
-});
+  render: renderPng,
+};
 
 const log = (event: string, fields: Record<string, unknown> = {}) =>
   console.log(JSON.stringify({ event, ...fields }));
@@ -225,5 +225,5 @@ export async function handleRequest(request: Request, env: Env, deps: Deps): Pro
 }
 
 export default {
-  fetch: (request, env) => handleRequest(request, env, liveDeps(env)),
+  fetch: (request, env) => handleRequest(request, env, liveDeps),
 } satisfies ExportedHandler<Env>;
