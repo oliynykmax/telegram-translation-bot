@@ -231,7 +231,7 @@ describe("thread photo", () => {
     expect(fake.sent()[0].url).toContain("/editMessageMedia");
   });
 
-  it("starts the photo at the first Ukrainian comment under an English post", async () => {
+  it("starts the photo at the first Ukrainian comment under an English post, with earlier comments", async () => {
     const english = "My study setup: brown switches.";
     const first = fakeDeps(healthyRoute);
     await send(channelPost({ text: english }), first.deps);
@@ -242,6 +242,8 @@ describe("thread photo", () => {
     const fake = fakeDeps(healthyRoute);
     await send(channelPost(comment()), fake.deps);
     expect(fake.renders[0]).toContain(english);
+    expect(fake.renders[0]).toContain("Nice setup!");
+    expect(fake.renders[0].indexOf("Nice setup!")).toBeLessThan(fake.renders[0].indexOf("EN(Капець"));
     expect(fake.sent()[0].url).toContain("/sendPhoto");
   });
 
@@ -326,7 +328,6 @@ describe("thread photo", () => {
     ["group messages outside a comment thread", { sender_chat: undefined, from: { id: 5, is_bot: false, first_name: "A" } }],
     ["channel messages that are not automatic forwards or in a thread", { is_automatic_forward: undefined }],
     ["comments in a thread the bot never saw", comment({ message_thread_id: 999, reply_to_message: { message_id: 999 } })],
-    ["English comments when the thread has no photo", comment({ text: "Great post, thanks for sharing!" })],
     ["other chats", { chat: { id: -100999, type: "supergroup" } }],
   ])("skips %s", async (_, overrides) => {
     const fake = fakeDeps(healthyRoute);

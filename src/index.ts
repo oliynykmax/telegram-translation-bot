@@ -114,11 +114,22 @@ async function handleComment(env: Env, deps: Deps, message: Message, source: str
     return text(200, "unknown thread");
   }
   if (!source) return text(200, "no text");
-  // Other languages only join a thread that already has a photo, so they never start one.
+  const author = authorOf(message);
+  const save = (english: string) =>
+    saveComment(env.DB, thread, {
+      messageId: message.message_id,
+      authorId: author.id,
+      authorName: author.name,
+      text: english,
+      date: message.date,
+    });
+  // Other languages are kept as written, but never start a picture on their own. They show up
+  // once a Ukrainian comment starts it, so the picture has the whole conversation.
   const ukrainian = isUkrainianText(source);
   if (!ukrainian && !thread.photoMessageId) {
-    log("not_ukrainian", { kind: "comment", message_id: message.message_id });
-    return text(200, "not ukrainian");
+    await save(source);
+    log("comment_saved_for_later", { message_id: message.message_id });
+    return text(200, "saved");
   }
 
   return updateThread(env, deps, message, thread, "comment", async () => {
@@ -133,14 +144,7 @@ async function handleComment(env: Env, deps: Deps, message: Message, source: str
       if (!translated.ok) return translated;
       english = translated.value;
     }
-    const author = authorOf(message);
-    await saveComment(env.DB, thread, {
-      messageId: message.message_id,
-      authorId: author.id,
-      authorName: author.name,
-      text: english,
-      date: message.date,
-    });
+    await save(english);
     return { ok: true, value: undefined };
   });
 }
