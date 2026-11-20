@@ -2,6 +2,8 @@ export interface Deps {
   fetch: typeof fetch;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
+  /** Screenshots the `#thread` element of an HTML page as PNG. */
+  render: (html: string) => Promise<Uint8Array>;
 }
 
 export type Upstream<T> =

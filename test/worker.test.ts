@@ -8,33 +8,54 @@ const NOW = 1_800_000_000;
 const CHANNEL = -1001000000001;
 const GROUP = -1001000000002;
 const UKRAINIAN = "Привіт, світе! Сьогодні гарний день.";
+const PNG = new Uint8Array([137, 80, 78, 71]);
 
-type Route = (url: string, body: unknown) => Response | Promise<Response>;
+type Route = (url: string, body: any) => Response | Promise<Response>;
 
-function fakeDeps(route: Route) {
+const formFields = (form: FormData) =>
+  Object.fromEntries([...form.entries()].map(([k, v]) => [k, typeof v === "string" ? v : "<file>"]));
+
+function fakeDeps(route: Route, onRender: (html: string) => void | Promise<void> = () => {}) {
   const calls: { url: string; body: any; headers: Headers }[] = [];
   const sleeps: number[] = [];
+  const renders: string[] = [];
   const deps: Deps = {
     now: () => NOW,
     sleep: async (ms) => void sleeps.push(ms),
     fetch: async (input, init) => {
       const url = String(input);
-      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      const raw = init?.body;
+      const body = raw instanceof FormData ? formFields(raw) : raw ? JSON.parse(String(raw)) : undefined;
       calls.push({ url, body, headers: new Headers(init?.headers) });
       return route(url, body);
     },
+    render: async (html) => {
+      renders.push(html);
+      await onRender(html);
+      return PNG;
+    },
   };
-  const to = (host: string) => calls.filter((c) => c.url.includes(host));
-  return { deps, calls, sleeps, deepl: () => to("deepl.com"), telegram: () => to("api.telegram.org") };
+  const to = (part: string) => calls.filter((c) => c.url.includes(part));
+  return {
+    deps,
+    calls,
+    sleeps,
+    renders,
+    deepl: () => to("deepl.com"),
+    telegram: () => to("api.telegram.org"),
+    sent: () => calls.filter((c) => /\/(sendPhoto|editMessageMedia|sendMessage)$/.test(c.url)),
+  };
 }
 
 const json = (body: unknown, status = 200, headers: HeadersInit = {}) =>
   Response.json(body, { status, headers });
 
-const healthyRoute: Route = (url, body: any) =>
-  url.includes("deepl.com")
-    ? json({ translations: [{ text: `EN(${body.text[0]})` }] })
-    : json({ ok: true, result: { message_id: 777 } });
+const healthyRoute: Route = (url, body) => {
+  if (url.includes("deepl.com")) return json({ translations: [{ text: `EN(${body.text[0]})` }] });
+  if (url.includes("/getChat?")) return json({ ok: true, result: { id: CHANNEL } });
+  if (url.includes("/getUserProfilePhotos?")) return json({ ok: true, result: { total_count: 0, photos: [] } });
+  return json({ ok: true, result: { message_id: 777 } });
+};
 
 function channelPost(overrides: Record<string, unknown> = {}) {
   return {
@@ -43,7 +64,7 @@ function channelPost(overrides: Record<string, unknown> = {}) {
       message_id: 42,
       date: NOW - 2,
       chat: { id: GROUP, type: "supergroup" },
-      sender_chat: { id: CHANNEL, type: "channel" },
+      sender_chat: { id: CHANNEL, type: "channel", title: "Neuromax" },
       is_automatic_forward: true,
       text: UKRAINIAN,
       ...overrides,
@@ -56,9 +77,10 @@ function comment(overrides: Record<string, unknown> = {}) {
     message_id: 50,
     sender_chat: undefined,
     is_automatic_forward: undefined,
-    from: { id: 5, is_bot: false },
+    from: { id: 5, is_bot: false, first_name: "Olena", last_name: "K" },
     message_thread_id: 42,
     reply_to_message: { message_id: 42, text: "Порада дня: спробуйте техніку «помідора»." },
+    text: "Капець, а я думала що це просто про задоволення",
     ...overrides,
   };
 }
@@ -73,14 +95,26 @@ function webhook(update: unknown, secret: string | null = env.TELEGRAM_WEBHOOK_S
   });
 }
 
+const send = (update: unknown, deps: Deps = fakeDeps(healthyRoute).deps) =>
+  handleRequest(webhook(update), env, deps);
+
 const postRow = (messageId = 42) =>
   env.DB.prepare("SELECT state, reply_message_id, error FROM posts WHERE message_id = ?1")
     .bind(messageId)
     .first<{ state: string; reply_message_id: number | null; error: string | null }>();
 
+const threadRow = () =>
+  env.DB.prepare("SELECT translation, photo_message_id, version FROM thread_posts WHERE message_id = 42").first<{
+    translation: string | null;
+    photo_message_id: number | null;
+    version: number;
+  }>();
+
 beforeEach(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
-  await env.DB.exec("DELETE FROM posts; DELETE FROM thread_posts;");
+  await env.DB.exec(
+    "DELETE FROM posts; DELETE FROM thread_posts; DELETE FROM thread_comments; DELETE FROM profiles;",
+  );
 });
 
 describe("language detection matches the Python bot", () => {
@@ -137,25 +171,28 @@ describe("webhook auth and routing", () => {
   });
 });
 
-describe("translation", () => {
-  it("translates a Ukrainian channel post and replies to it in the discussion group", async () => {
+describe("thread photo", () => {
+  it("answers a Ukrainian channel post with a rendered photo of its translation", async () => {
     const fake = fakeDeps(healthyRoute);
-    const res = await handleRequest(webhook(channelPost()), env, fake.deps);
-    expect(res.status).toBe(200);
+    expect((await send(channelPost(), fake.deps)).status).toBe(200);
 
     const [deepl] = fake.deepl();
     expect(deepl.url).toBe("https://api-free.deepl.com/v2/translate");
     expect(deepl.headers.get("Authorization")).toBe(`DeepL-Auth-Key ${env.DEEPL_API_KEY}`);
     expect(deepl.body).toEqual({ text: [UKRAINIAN], source_lang: "UK", target_lang: "EN-US" });
 
-    const [send] = fake.telegram();
-    expect(send.url).toBe(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`);
-    expect(send.body).toEqual({
-      chat_id: GROUP,
-      text: `EN(${UKRAINIAN})`,
-      reply_parameters: { message_id: 42 },
+    expect(fake.renders).toHaveLength(1);
+    expect(fake.renders[0]).toContain(`EN(${UKRAINIAN})`);
+    expect(fake.renders[0]).toContain("Neuromax");
+    const [photo] = fake.sent();
+    expect(photo.url).toBe(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`);
+    expect(photo.body).toEqual({
+      chat_id: String(GROUP),
+      reply_parameters: JSON.stringify({ message_id: 42 }),
+      photo: "<file>",
     });
     expect(await postRow()).toEqual({ state: "done", reply_message_id: 777, error: null });
+    expect(await threadRow()).toMatchObject({ translation: `EN(${UKRAINIAN})`, photo_message_id: 777 });
   });
 
   it("uses the pro DeepL endpoint for keys without the :fx suffix", async () => {
@@ -166,8 +203,119 @@ describe("translation", () => {
 
   it("translates photo captions", async () => {
     const fake = fakeDeps(healthyRoute);
-    await handleRequest(webhook(channelPost({ text: undefined, caption: UKRAINIAN })), env, fake.deps);
-    expect(fake.telegram()[0].body.text).toBe(`EN(${UKRAINIAN})`);
+    await send(channelPost({ text: undefined, caption: UKRAINIAN }), fake.deps);
+    expect(fake.renders[0]).toContain(`EN(${UKRAINIAN})`);
+  });
+
+  it("adds a translated comment with its writer's name by editing the same photo", async () => {
+    await send(channelPost());
+    const fake = fakeDeps(healthyRoute);
+    expect((await send(channelPost(comment()), fake.deps)).status).toBe(200);
+
+    expect(fake.deepl()[0].body.context).toBe("Порада дня: спробуйте техніку «помідора».");
+    expect(fake.renders[0]).toContain("Olena K");
+    expect(fake.renders[0]).toContain("EN(Капець, а я думала що це просто про задоволення)");
+    expect(fake.renders[0]).toContain(`EN(${UKRAINIAN})`);
+    const [edit] = fake.sent();
+    expect(edit.url).toContain("/editMessageMedia");
+    expect(edit.body).toMatchObject({ chat_id: String(GROUP), message_id: "777" });
+    expect(await postRow(50)).toEqual({ state: "done", reply_message_id: 777, error: null });
+  });
+
+  it("adds English comments as written to a thread that already has a photo", async () => {
+    await send(channelPost());
+    const fake = fakeDeps(healthyRoute);
+    await send(channelPost(comment({ text: "Great post, thanks!" })), fake.deps);
+    expect(fake.deepl()).toHaveLength(0);
+    expect(fake.renders[0]).toContain("Great post, thanks!");
+    expect(fake.sent()[0].url).toContain("/editMessageMedia");
+  });
+
+  it("starts the photo at the first Ukrainian comment under an English post", async () => {
+    const english = "My study setup: brown switches.";
+    const first = fakeDeps(healthyRoute);
+    await send(channelPost({ text: english }), first.deps);
+    expect(first.calls).toHaveLength(0);
+    await send(channelPost(comment({ message_id: 49, text: "Nice setup!" })), first.deps);
+    expect(first.calls).toHaveLength(0);
+
+    const fake = fakeDeps(healthyRoute);
+    await send(channelPost(comment()), fake.deps);
+    expect(fake.renders[0]).toContain(english);
+    expect(fake.sent()[0].url).toContain("/sendPhoto");
+  });
+
+  it("gives a nested reply both the channel post and the comment it answers as context", async () => {
+    const post = "Ділюся сетапом: клавіатура з коричневими світчами.";
+    await send(channelPost({ text: post }));
+    const fake = fakeDeps(healthyRoute);
+    const nested = comment({ text: "Сині взагалі зло", reply_to_message: { message_id: 49, text: "Та ні, це ж не сині" } });
+    await send(channelPost(nested), fake.deps);
+    expect(fake.deepl()[0].body.context).toBe(`Post: ${post}\nComment: Та ні, це ж не сині`);
+  });
+
+  it.each([
+    ["an anonymous group admin", { id: GROUP, type: "supergroup", title: "Neuromax Chat" }, "Neuromax Chat"],
+    ["the channel itself", { id: CHANNEL, type: "channel", title: "Neuromax" }, "Neuromax"],
+  ])("shows a comment sent as %s under the chat's name", async (_, sender_chat, name) => {
+    await send(channelPost());
+    const fake = fakeDeps(healthyRoute);
+    await send(channelPost(comment({ sender_chat, from: { id: 1087968824, is_bot: true, first_name: "Group" } })), fake.deps);
+    expect(fake.renders[0]).toMatch(new RegExp(`class="name"[^>]*>${name}</span> EN`));
+    expect(await env.DB.prepare("SELECT count(*) n FROM thread_posts").first("n")).toBe(1);
+  });
+
+  it("draws profile photos and caches them for a week", async () => {
+    await send(channelPost());
+    const route: Route = (url, body) => {
+      if (url.includes("/getUserProfilePhotos?")) {
+        return json({ ok: true, result: { total_count: 1, photos: [[{ file_id: "small" }]] } });
+      }
+      if (url.includes("/getFile?")) return json({ ok: true, result: { file_path: "photos/a.jpg" } });
+      if (url.includes("/file/bot")) return new Response(new Uint8Array([1, 2, 3]));
+      return healthyRoute(url, body);
+    };
+    const fake = fakeDeps(route);
+    await send(channelPost(comment()), fake.deps);
+    expect(fake.renders[0]).toContain('src="data:image/jpeg;base64,AQID"');
+
+    const again = fakeDeps(route);
+    await send(channelPost(comment({ message_id: 51 })), again.deps);
+    expect(again.renders[0]).toContain('src="data:image/jpeg;base64,AQID"');
+    expect(again.calls.filter((c) => c.url.includes("/getUserProfilePhotos"))).toHaveLength(0);
+  });
+
+  it("redraws when another comment lands while the photo is being rendered", async () => {
+    await send(channelPost());
+    let racing = true;
+    const fake = fakeDeps(healthyRoute, async () => {
+      if (!racing) return;
+      racing = false;
+      await send(channelPost(comment({ message_id: 60, text: "Мені теж цікаво" })));
+    });
+    await send(channelPost(comment()), fake.deps);
+    expect(fake.renders).toHaveLength(2);
+    expect(fake.renders[1]).toContain("EN(Мені теж цікаво)");
+    expect(fake.sent()).toHaveLength(2);
+  });
+
+  it("lets the request that is sending the first photo pick up comments that arrive meanwhile", async () => {
+    await send(channelPost({ text: "English post" }));
+    await env.DB.prepare("UPDATE thread_posts SET photo_message_id = 0, photo_claimed_at = ?1").bind(NOW).run();
+    const fake = fakeDeps(healthyRoute);
+    expect((await send(channelPost(comment()), fake.deps)).status).toBe(200);
+    expect(fake.renders).toHaveLength(0);
+    expect(fake.sent()).toHaveLength(0);
+    expect(await env.DB.prepare("SELECT count(*) n FROM thread_comments").first("n")).toBe(1);
+  });
+
+  it("asks for redelivery when rendering fails, and frees the photo claim", async () => {
+    const fake = fakeDeps(healthyRoute, () => {
+      throw new Error("browser limit");
+    });
+    expect((await send(channelPost(), fake.deps)).status).toBe(503);
+    expect(await postRow()).toBeNull();
+    expect((await threadRow())?.photo_message_id).toBeNull();
   });
 
   it.each([
@@ -175,70 +323,24 @@ describe("translation", () => {
     ["non-Ukrainian posts", { text: "Hola, ¿qué tal? Buenos días." }],
     ["posts without text", { text: undefined }],
     ["posts older than the age window", { date: NOW - 301 }],
-    ["group messages outside a comment thread", { sender_chat: undefined, from: { id: 5, is_bot: false } }],
+    ["group messages outside a comment thread", { sender_chat: undefined, from: { id: 5, is_bot: false, first_name: "A" } }],
     ["channel messages that are not automatic forwards or in a thread", { is_automatic_forward: undefined }],
-    ["English comments", { ...comment(), text: "Great post, thanks for sharing!" }],
+    ["comments in a thread the bot never saw", comment({ message_thread_id: 999, reply_to_message: { message_id: 999 } })],
+    ["English comments when the thread has no photo", comment({ text: "Great post, thanks for sharing!" })],
     ["other chats", { chat: { id: -100999, type: "supergroup" } }],
   ])("skips %s", async (_, overrides) => {
     const fake = fakeDeps(healthyRoute);
-    const res = await handleRequest(webhook(channelPost(overrides)), env, fake.deps);
+    const res = await send(channelPost(overrides), fake.deps);
     expect(res.status).toBe(200);
     expect(fake.calls).toHaveLength(0);
     expect(await postRow()).toBeNull();
-  });
-
-  it.each([
-    ["a direct comment under a post", comment()],
-    ["a reply to another comment", comment({ reply_to_message: { message_id: 49, text: "А запис стріму буде?" } })],
-  ])("translates %s and replies to that comment", async (_, overrides) => {
-    const fake = fakeDeps(healthyRoute);
-    const res = await handleRequest(webhook(channelPost(overrides)), env, fake.deps);
-    expect(res.status).toBe(200);
-    expect(fake.deepl()[0].body.context).toBe(
-      (overrides.reply_to_message as { text: string }).text,
-    );
-    expect(fake.telegram()[0].body).toEqual({
-      chat_id: GROUP,
-      text: `EN(${UKRAINIAN})`,
-      reply_parameters: { message_id: 50 },
-    });
-    expect(await postRow(50)).toEqual({ state: "done", reply_message_id: 777, error: null });
-  });
-
-  it("gives a nested reply both the channel post and the comment it answers as context", async () => {
-    const post = "Ділюся сетапом: клавіатура з коричневими світчами.";
-    await handleRequest(webhook(channelPost({ text: post })), env, fakeDeps(healthyRoute).deps);
-
-    const fake = fakeDeps(healthyRoute);
-    const nested = comment({ text: "Сині взагалі зло", reply_to_message: { message_id: 49, text: "Та ні, це ж не сині" } });
-    await handleRequest(webhook(channelPost(nested)), env, fake.deps);
-    expect(fake.deepl()[0].body.context).toBe(`Post: ${post}\nComment: Та ні, це ж не сині`);
-  });
-
-  it("remembers English channel posts so their Ukrainian comments still get the post as context", async () => {
-    const post = "My study setup: brown switches.";
-    await handleRequest(webhook(channelPost({ text: post })), env, fakeDeps(healthyRoute).deps);
-
-    const fake = fakeDeps(healthyRoute);
-    const nested = comment({ reply_to_message: { message_id: 49, text: "Та ні, це ж не сині" } });
-    await handleRequest(webhook(channelPost(nested)), env, fake.deps);
-    expect(fake.deepl()[0].body.context).toBe(`Post: ${post}\nComment: Та ні, це ж не сині`);
-  });
-
-  it.each([
-    ["an anonymous group admin", { from: { id: 1087968824, is_bot: true }, sender_chat: { id: GROUP, type: "supergroup" } }],
-    ["the channel itself", { from: { id: 136817688, is_bot: true }, sender_chat: { id: CHANNEL, type: "channel" } }],
-  ])("translates a comment sent as %s without storing it as a post", async (_, sender) => {
-    const fake = fakeDeps(healthyRoute);
-    await handleRequest(webhook(channelPost(comment(sender))), env, fake.deps);
-    expect(fake.telegram()[0].body.reply_parameters).toEqual({ message_id: 50 });
-    expect(await env.DB.prepare("SELECT count(*) n FROM thread_posts").first("n")).toBe(0);
+    expect(await postRow(50)).toBeNull();
   });
 
   it("ignores edited messages and non-message updates", async () => {
     const fake = fakeDeps(healthyRoute);
     const edited = { update_id: 2, edited_message: channelPost().message };
-    expect((await handleRequest(webhook(edited), env, fake.deps)).status).toBe(200);
+    expect((await send(edited, fake.deps)).status).toBe(200);
     expect(fake.calls).toHaveLength(0);
   });
 });
@@ -284,10 +386,10 @@ describe("/start", () => {
 describe("retries and persistence", () => {
   it("does not post twice when Telegram redelivers a handled update", async () => {
     const fake = fakeDeps(healthyRoute);
-    expect((await handleRequest(webhook(channelPost()), env, fake.deps)).status).toBe(200);
-    expect((await handleRequest(webhook(channelPost()), env, fake.deps)).status).toBe(200);
+    expect((await send(channelPost(), fake.deps)).status).toBe(200);
+    expect((await send(channelPost(), fake.deps)).status).toBe(200);
     expect(fake.deepl()).toHaveLength(1);
-    expect(fake.telegram()).toHaveLength(1);
+    expect(fake.sent()).toHaveLength(1);
   });
 
   it("retries DeepL 5xx in-request, then succeeds", async () => {
@@ -297,7 +399,7 @@ describe("retries and persistence", () => {
         ? new Response("busy", { status: 503 })
         : healthyRoute(url, body),
     );
-    expect((await handleRequest(webhook(channelPost()), env, fake.deps)).status).toBe(200);
+    expect((await send(channelPost(), fake.deps)).status).toBe(200);
     expect(fake.deepl()).toHaveLength(3);
     expect(fake.sleeps).toEqual([500, 1000]);
     expect((await postRow())?.state).toBe("done");
@@ -306,13 +408,13 @@ describe("retries and persistence", () => {
   it("honors Telegram retry_after on 429", async () => {
     let sends = 0;
     const fake = fakeDeps((url, body) =>
-      url.includes("api.telegram.org") && ++sends === 1
+      url.endsWith("/sendPhoto") && ++sends === 1
         ? json({ ok: false, error_code: 429, parameters: { retry_after: 2 } }, 429)
         : healthyRoute(url, body),
     );
-    expect((await handleRequest(webhook(channelPost()), env, fake.deps)).status).toBe(200);
+    expect((await send(channelPost(), fake.deps)).status).toBe(200);
     expect(fake.sleeps).toEqual([2000]);
-    expect(fake.telegram()).toHaveLength(2);
+    expect(fake.sent()).toHaveLength(2);
   });
 
   it("releases the claim and asks Telegram to redeliver after transient failure", async () => {
@@ -321,41 +423,53 @@ describe("retries and persistence", () => {
       if (url.includes("deepl.com") && down) throw new Error("connection reset");
       return healthyRoute(url, body);
     });
-    expect((await handleRequest(webhook(channelPost()), env, fake.deps)).status).toBe(503);
+    expect((await send(channelPost(), fake.deps)).status).toBe(503);
     expect(fake.deepl()).toHaveLength(3);
-    expect(fake.telegram()).toHaveLength(0);
+    expect(fake.sent()).toHaveLength(0);
     expect(await postRow()).toBeNull();
 
     down = false;
-    expect((await handleRequest(webhook(channelPost()), env, fake.deps)).status).toBe(200);
-    expect(fake.telegram()).toHaveLength(1);
+    expect((await send(channelPost(), fake.deps)).status).toBe(200);
+    expect(fake.sent()).toHaveLength(1);
     expect((await postRow())?.state).toBe("done");
   });
 
-  it("gives up on a retry_after longer than the in-request budget", async () => {
+  it("gives up on a retry_after longer than the in-request budget and frees the photo claim", async () => {
     const fake = fakeDeps((url, body) =>
-      url.includes("api.telegram.org")
+      url.endsWith("/sendPhoto")
         ? json({ ok: false, error_code: 429, parameters: { retry_after: 30 } }, 429)
         : healthyRoute(url, body),
     );
-    expect((await handleRequest(webhook(channelPost()), env, fake.deps)).status).toBe(503);
-    expect(fake.telegram()).toHaveLength(1);
+    expect((await send(channelPost(), fake.deps)).status).toBe(503);
+    expect(fake.sent()).toHaveLength(1);
     expect(fake.sleeps).toEqual([]);
+    expect((await threadRow())?.photo_message_id).toBeNull();
   });
 
   it("records permanent failures and acknowledges so Telegram stops redelivering", async () => {
     const fake = fakeDeps((url, body) =>
       url.includes("deepl.com") ? new Response("Quota exceeded", { status: 456 }) : healthyRoute(url, body),
     );
-    expect((await handleRequest(webhook(channelPost()), env, fake.deps)).status).toBe(200);
+    expect((await send(channelPost(), fake.deps)).status).toBe(200);
     expect(fake.deepl()).toHaveLength(1);
-    expect(fake.telegram()).toHaveLength(0);
+    expect(fake.sent()).toHaveLength(0);
     const row = await postRow();
     expect(row?.state).toBe("failed");
     expect(row?.error).toContain("deepl: HTTP 456");
 
-    expect((await handleRequest(webhook(channelPost()), env, fake.deps)).status).toBe(200);
+    expect((await send(channelPost(), fake.deps)).status).toBe(200);
     expect(fake.deepl()).toHaveLength(1);
+  });
+
+  it("treats an unchanged photo edit as success", async () => {
+    await send(channelPost());
+    const fake = fakeDeps((url, body) =>
+      url.endsWith("/editMessageMedia")
+        ? json({ ok: false, error_code: 400, description: "Bad Request: message is not modified" }, 400)
+        : healthyRoute(url, body),
+    );
+    expect((await send(channelPost(comment()), fake.deps)).status).toBe(200);
+    expect((await postRow(50))?.state).toBe("done");
   });
 
   it("asks for redelivery while another delivery holds a fresh claim", async () => {
@@ -365,7 +479,7 @@ describe("retries and persistence", () => {
       .bind(GROUP, NOW - 10)
       .run();
     const fake = fakeDeps(healthyRoute);
-    expect((await handleRequest(webhook(channelPost()), env, fake.deps)).status).toBe(503);
+    expect((await send(channelPost(), fake.deps)).status).toBe(503);
     expect(fake.calls).toHaveLength(0);
   });
 
@@ -376,8 +490,8 @@ describe("retries and persistence", () => {
       .bind(GROUP, NOW - 61)
       .run();
     const fake = fakeDeps(healthyRoute);
-    expect((await handleRequest(webhook(channelPost()), env, fake.deps)).status).toBe(200);
-    expect(fake.telegram()).toHaveLength(1);
+    expect((await send(channelPost(), fake.deps)).status).toBe(200);
+    expect(fake.sent()).toHaveLength(1);
     expect((await postRow())?.state).toBe("done");
   });
 });

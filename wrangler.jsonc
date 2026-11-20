@@ -19,6 +19,7 @@
       "DISCUSSION_GROUP_ID"
     ]
   },
+  "browser": { "binding": "BROWSER" },
   "d1_databases": [
     {
       "binding": "DB",
