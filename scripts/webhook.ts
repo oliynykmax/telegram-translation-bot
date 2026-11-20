@@ -29,7 +29,7 @@ if (command === "info") {
   await call("setWebhook", {
     url: WEBHOOK_URL,
     secret_token: secret,
-    allowed_updates: ["message"],
+    allowed_updates: ["message", "edited_message"],
     drop_pending_updates: flags.includes("--drop-pending"),
   });
 } else if (command === "describe") {

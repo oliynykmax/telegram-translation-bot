@@ -3,6 +3,8 @@ import { fetchWithRetry, type Deps, type Upstream } from "./upstream";
 export interface Message {
   message_id: number;
   date: number;
+  /** Set only on edited messages. */
+  edit_date?: number;
   chat: { id: number; type: string };
   sender_chat?: { id: number; title?: string };
   from?: { id: number; first_name: string; last_name?: string };
@@ -14,9 +16,12 @@ export interface Message {
   entities?: { type: string; offset: number; length: number }[];
 }
 
+/** Reads a new or edited message. An edited one always carries `edit_date`. */
 export function parseMessage(update: unknown): Message | undefined {
-  if (typeof update !== "object" || update === null || !("message" in update)) return undefined;
-  const message = update.message as Partial<Message> | null;
+  if (typeof update !== "object" || update === null) return undefined;
+  const edited = "edited_message" in update;
+  if (!edited && !("message" in update)) return undefined;
+  const message = (edited ? update.edited_message : update.message) as Partial<Message> | null;
   if (
     typeof message?.message_id !== "number" ||
     typeof message.date !== "number" ||
@@ -24,7 +29,7 @@ export function parseMessage(update: unknown): Message | undefined {
   ) {
     return undefined;
   }
-  return message as Message;
+  return edited ? ({ ...message, edit_date: message.edit_date ?? message.date } as Message) : (message as Message);
 }
 
 export function isStartCommand(message: Message): boolean {

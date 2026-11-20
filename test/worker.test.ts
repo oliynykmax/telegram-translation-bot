@@ -342,10 +342,89 @@ describe("thread photo", () => {
     expect(await postRow(50)).toBeNull();
   });
 
-  it("ignores edited messages and non-message updates", async () => {
+  it("ignores non-message updates", async () => {
     const fake = fakeDeps(healthyRoute);
-    const edited = { update_id: 2, edited_message: channelPost().message };
-    expect((await send(edited, fake.deps)).status).toBe(200);
+    expect((await send({ update_id: 2, channel_post: channelPost().message }, fake.deps)).status).toBe(200);
+    expect(fake.calls).toHaveLength(0);
+  });
+});
+
+const edit = (update: { message: Record<string, unknown> }, editDate = NOW - 1) => ({
+  update_id: 3,
+  edited_message: { ...update.message, edit_date: editDate },
+});
+
+describe("edits", () => {
+  it("redraws the photo with the edited comment's new translation", async () => {
+    await send(channelPost());
+    await send(channelPost(comment()));
+    const fake = fakeDeps(healthyRoute);
+    expect((await send(edit(channelPost(comment({ text: "Ой, я помилилася" }))), fake.deps)).status).toBe(200);
+
+    expect(fake.renders).toHaveLength(1);
+    expect(fake.renders[0]).toContain("EN(Ой, я помилилася)");
+    expect(fake.renders[0]).not.toContain("Капець");
+    expect(fake.sent()).toHaveLength(1);
+    expect(fake.sent()[0].url).toContain("/editMessageMedia");
+    expect(await env.DB.prepare("SELECT count(*) n FROM thread_comments").first("n")).toBe(1);
+  });
+
+  it("keeps the newest edit when an older one finishes last", async () => {
+    await send(channelPost());
+    await send(channelPost(comment()));
+    await send(edit(channelPost(comment({ text: "Друга версія" })), NOW - 1));
+    const fake = fakeDeps(healthyRoute);
+    await send(edit(channelPost(comment({ text: "Перша версія" })), NOW - 5), fake.deps);
+    expect(fake.renders.at(-1)).toContain("EN(Друга версія)");
+    expect(fake.renders.at(-1)).not.toContain("Перша");
+  });
+
+  it("keeps an edit that arrives before the original comment is processed", async () => {
+    await send(channelPost());
+    await send(edit(channelPost(comment({ text: "Виправлений текст" }))));
+    const fake = fakeDeps(healthyRoute);
+    expect((await send(channelPost(comment()), fake.deps)).status).toBe(200);
+    expect(fake.renders.at(-1)).toContain("EN(Виправлений текст)");
+    expect(fake.renders.at(-1)).not.toContain("Капець");
+  });
+
+  it("updates a comment edited long after it was written", async () => {
+    await send(channelPost());
+    await send(channelPost(comment()));
+    const fake = fakeDeps(healthyRoute);
+    await send(edit(channelPost(comment({ date: NOW - 86_400, text: "Оновлено" }))), fake.deps);
+    expect(fake.renders[0]).toContain("EN(Оновлено)");
+  });
+
+  it("retranslates an edited post", async () => {
+    await send(channelPost());
+    const fake = fakeDeps(healthyRoute);
+    expect((await send(edit(channelPost({ text: "Новий текст посту" })), fake.deps)).status).toBe(200);
+    expect(fake.renders[0]).toContain("EN(Новий текст посту)");
+    expect(fake.sent()[0].url).toContain("/editMessageMedia");
+    expect(await threadRow()).toMatchObject({ translation: "EN(Новий текст посту)" });
+  });
+
+  it("shows a post edited into English as written", async () => {
+    await send(channelPost());
+    const fake = fakeDeps(healthyRoute);
+    await send(edit(channelPost({ text: "Now in English, sorry." })), fake.deps);
+    expect(fake.deepl()).toHaveLength(0);
+    expect(fake.renders[0]).toContain("Now in English, sorry.");
+    expect(await threadRow()).toMatchObject({ translation: null });
+  });
+
+  it("asks Telegram to resend an edit when DeepL is down", async () => {
+    await send(channelPost());
+    await send(channelPost(comment()));
+    const fake = fakeDeps((url, body) => (url.includes("deepl.com") ? json({}, 503) : healthyRoute(url, body)));
+    expect((await send(edit(channelPost(comment({ text: "Ой" }))), fake.deps)).status).toBe(503);
+  });
+
+  it("ignores edited direct messages", async () => {
+    const fake = fakeDeps(healthyRoute);
+    const dm = { message_id: 9, date: NOW, chat: { id: 5, type: "private" }, from: { id: 5, first_name: "O" }, text: "Привіт" };
+    expect((await send({ update_id: 4, edited_message: { ...dm, edit_date: NOW } }, fake.deps)).status).toBe(200);
     expect(fake.calls).toHaveLength(0);
   });
 });

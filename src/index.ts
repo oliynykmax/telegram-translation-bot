@@ -49,6 +49,7 @@ const isUkrainianText = (source: string) => !isEnglish(source) && isUkrainian(so
 /**
  * Runs once per post or comment: `update` writes it into the thread, then the thread's
  * photo is sent or redrawn. Transient failures release the claim so Telegram redelivers.
+ * An edit runs without a claim: a repeated edit only redraws the same picture.
  */
 async function updateThread(
   env: Env,
@@ -58,11 +59,14 @@ async function updateThread(
   kind: "post" | "comment",
   update: () => Promise<Upstream<void>>,
 ): Promise<Response> {
-  const ids = { kind, chat_id: message.chat.id, message_id: message.message_id };
-  const claim = await claimPost(env.DB, message.chat.id, message.message_id, deps.now());
-  if (!claim.claimed) {
-    log("already_claimed", { ...ids, state: claim.state });
-    return claim.state === "pending" ? text(503, "in progress") : text(200, "duplicate");
+  const edited = message.edit_date !== undefined;
+  const ids = { kind, chat_id: message.chat.id, message_id: message.message_id, ...(edited && { edited }) };
+  if (!edited) {
+    const claim = await claimPost(env.DB, message.chat.id, message.message_id, deps.now());
+    if (!claim.claimed) {
+      log("already_claimed", { ...ids, state: claim.state });
+      return claim.state === "pending" ? text(503, "in progress") : text(200, "duplicate");
+    }
   }
 
   const started = Date.now();
@@ -79,23 +83,27 @@ async function updateThread(
   };
 
   if (synced.ok) {
-    await settlePost(env.DB, message.chat.id, message.message_id, deps.now(), {
-      state: "done",
-      replyMessageId: synced.value ?? 0,
-    });
+    if (!edited) {
+      await settlePost(env.DB, message.chat.id, message.message_id, deps.now(), {
+        state: "done",
+        replyMessageId: synced.value ?? 0,
+      });
+    }
     log("thread_updated", { ...ids, photo_message_id: synced.value, ...timing });
     return text(200, "translated");
   }
   const stage = updated.ok ? "photo" : "deepl";
   if (synced.transient) {
-    await releasePost(env.DB, message.chat.id, message.message_id);
+    if (!edited) await releasePost(env.DB, message.chat.id, message.message_id);
     log("thread_retry", { ...ids, stage, detail: synced.detail });
     return text(503, "retry");
   }
-  await settlePost(env.DB, message.chat.id, message.message_id, deps.now(), {
-    state: "failed",
-    error: `${stage}: ${synced.detail}`,
-  });
+  if (!edited) {
+    await settlePost(env.DB, message.chat.id, message.message_id, deps.now(), {
+      state: "failed",
+      error: `${stage}: ${synced.detail}`,
+    });
+  }
   log("thread_failed", { ...ids, stage, detail: synced.detail });
   return text(200, "failed");
 }
@@ -105,17 +113,19 @@ async function handlePost(env: Env, deps: Deps, message: Message, source: string
   if (message.sender_chat?.title) {
     await rememberName(env.DB, message.sender_chat.id, message.sender_chat.title);
   }
-  await rememberThreadPost(env.DB, chatId, message.message_id, source, message.date);
-  if (!source) return text(200, "no text");
-  if (!isUkrainianText(source)) {
-    log("not_ukrainian", { kind: "post", message_id: message.message_id });
-    return text(200, "not ukrainian");
-  }
+  await rememberThreadPost(env.DB, chatId, message.message_id, source, message.date, message.edit_date);
   const thread = (await getThread(env.DB, chatId, message.message_id))!;
+  const ukrainian = source !== "" && isUkrainianText(source);
+  // An edited post redraws a picture that exists, whatever its language now.
+  if (!ukrainian && !(message.edit_date && thread.photoMessageId)) {
+    log("not_ukrainian", { kind: "post", message_id: message.message_id });
+    return text(200, source ? "not ukrainian" : "no text");
+  }
   return updateThread(env, deps, message, thread, "post", async () => {
+    if (!ukrainian) return { ok: true, value: undefined };
     const translated = await translate(deps, env.DEEPL_API_KEY, source, { source: "UK", target: "EN-US" });
     if (!translated.ok) return translated;
-    await setTranslation(env.DB, thread, translated.value);
+    await setTranslation(env.DB, thread, source, translated.value);
     return { ok: true, value: undefined };
   });
 }
@@ -136,6 +146,7 @@ async function handleComment(env: Env, deps: Deps, message: Message, source: str
       authorName: author.name,
       text: english,
       date: message.date,
+      editedAt: message.edit_date ?? 0,
     });
   // Other languages are kept as written, but never start a picture on their own. They show up
   // once a Ukrainian comment starts it, so the picture has the whole conversation.
@@ -233,8 +244,11 @@ async function handlePrivate(env: Env, deps: Deps, message: Message): Promise<Re
 }
 
 async function handleMessage(env: Env, deps: Deps, message: Message): Promise<Response> {
-  if (isStartCommand(message)) return answer(env, deps, message, START_REPLY, "start");
-  if (message.chat.type === "private") return handlePrivate(env, deps, message);
+  const edited = message.edit_date !== undefined;
+  if (isStartCommand(message) && !edited) return answer(env, deps, message, START_REPLY, "start");
+  if (message.chat.type === "private") {
+    return edited ? text(200, "edit ignored") : handlePrivate(env, deps, message);
+  }
 
   const groupId = Number(env.DISCUSSION_GROUP_ID);
   if (message.chat.type !== "supergroup" || message.chat.id !== groupId) {
@@ -251,7 +265,8 @@ async function handleMessage(env: Env, deps: Deps, message: Message): Promise<Re
     return text(200, "ignored");
   }
 
-  const age = deps.now() - message.date;
+  // An edit counts from when it was made, so fixing an old comment still updates the picture.
+  const age = deps.now() - (message.edit_date ?? message.date);
   if (age > Number(env.MESSAGE_MAX_AGE_SECONDS)) {
     log("too_old", { kind: isPost ? "post" : "comment", message_id: message.message_id, age });
     return text(200, "too old");
