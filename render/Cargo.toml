@@ -1,0 +1,22 @@
+[package]
+name = "thread-render"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Draws a translated Telegram thread as a PNG within a Workers Free CPU budget"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fontdue = "=0.9.5"
+png = "=0.18.1"
+jpeg-decoder = { version = "=0.3.2", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "=1.0.154"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -2,6 +2,7 @@ import { applyD1Migrations, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleRequest, START_REPLY, WEBHOOK_PATH } from "../src/index";
 import { isEnglish, isUkrainian } from "../src/language";
+import type { RenderInput } from "../src/thread-image";
 import type { Deps } from "../src/upstream";
 
 const NOW = 1_800_000_000;
@@ -15,7 +16,7 @@ type Route = (url: string, body: any) => Response | Promise<Response>;
 const formFields = (form: FormData) =>
   Object.fromEntries([...form.entries()].map(([k, v]) => [k, typeof v === "string" ? v : "<file>"]));
 
-function fakeDeps(route: Route, onRender: (html: string) => void | Promise<void> = () => {}) {
+function fakeDeps(route: Route, onRender: (input: RenderInput) => void = () => {}) {
   const calls: { url: string; body: any; headers: Headers }[] = [];
   const sleeps: number[] = [];
   const renders: string[] = [];
@@ -29,9 +30,9 @@ function fakeDeps(route: Route, onRender: (html: string) => void | Promise<void>
       calls.push({ url, body, headers: new Headers(init?.headers) });
       return route(url, body);
     },
-    render: async (html) => {
-      renders.push(html);
-      await onRender(html);
+    render: (input) => {
+      renders.push(JSON.stringify(input));
+      onRender(input);
       return PNG;
     },
   };
@@ -263,7 +264,7 @@ describe("thread photo", () => {
     await send(channelPost());
     const fake = fakeDeps(healthyRoute);
     await send(channelPost(comment({ sender_chat, from: { id: 1087968824, is_bot: true, first_name: "Group" } })), fake.deps);
-    expect(fake.renders[0]).toMatch(new RegExp(`class="name"[^>]*>${name}</span> EN`));
+    expect(fake.renders[0]).toMatch(new RegExp(`"name":"${name}"[^}]*"text":"EN\\(`));
     expect(await env.DB.prepare("SELECT count(*) n FROM thread_posts").first("n")).toBe(1);
   });
 
@@ -279,21 +280,23 @@ describe("thread photo", () => {
     };
     const fake = fakeDeps(route);
     await send(channelPost(comment()), fake.deps);
-    expect(fake.renders[0]).toContain('src="data:image/jpeg;base64,AQID"');
+    expect(fake.renders[0]).toContain('"avatar":"AQID"');
 
     const again = fakeDeps(route);
     await send(channelPost(comment({ message_id: 51 })), again.deps);
-    expect(again.renders[0]).toContain('src="data:image/jpeg;base64,AQID"');
+    expect(again.renders[0]).toContain('"avatar":"AQID"');
     expect(again.calls.filter((c) => c.url.includes("/getUserProfilePhotos"))).toHaveLength(0);
   });
 
-  it("redraws when another comment lands while the photo is being rendered", async () => {
+  it("redraws when another comment lands while the photo is being uploaded", async () => {
     await send(channelPost());
     let racing = true;
-    const fake = fakeDeps(healthyRoute, async () => {
-      if (!racing) return;
-      racing = false;
-      await send(channelPost(comment({ message_id: 60, text: "Мені теж цікаво" })));
+    const fake = fakeDeps(async (url, body) => {
+      if (racing && url.endsWith("/editMessageMedia")) {
+        racing = false;
+        await send(channelPost(comment({ message_id: 60, text: "Мені теж цікаво" })));
+      }
+      return healthyRoute(url, body);
     });
     await send(channelPost(comment()), fake.deps);
     expect(fake.renders).toHaveLength(2);
@@ -311,12 +314,12 @@ describe("thread photo", () => {
     expect(await env.DB.prepare("SELECT count(*) n FROM thread_comments").first("n")).toBe(1);
   });
 
-  it("asks for redelivery when rendering fails, and frees the photo claim", async () => {
+  it("records a render failure as permanent and frees the photo claim", async () => {
     const fake = fakeDeps(healthyRoute, () => {
-      throw new Error("browser limit");
+      throw new Error("renderer rejected its input");
     });
-    expect((await send(channelPost(), fake.deps)).status).toBe(503);
-    expect(await postRow()).toBeNull();
+    expect((await send(channelPost(), fake.deps)).status).toBe(200);
+    expect(await postRow()).toMatchObject({ state: "failed", error: "photo: render: renderer rejected its input" });
     expect((await threadRow())?.photo_message_id).toBeNull();
   });
 

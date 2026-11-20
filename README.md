@@ -7,21 +7,26 @@ Translates Ukrainian channel posts and their comments to English with DeepL. Eac
 - Telegram auto-forwards each channel post into the discussion group. When the forward comes from `CHANNEL_ID`, the Worker stores the post in `thread_posts`. If the post is Ukrainian, it translates the text or caption (`UK` to `EN-US`) and replies with the thread picture.
 - A comment is any message in a post's comment thread (`message_thread_id` or `reply_to_message` is set) that is not the channel's automatic forward. Comments sent by anonymous admins or as the channel count, under the chat's name. A Ukrainian comment is translated and added to the picture, which is created at that point if the post was not Ukrainian. Comments in other languages are kept as written. They never start a picture, but appear in it once a Ukrainian comment does, so the picture shows the whole conversation. Plain group messages outside a thread are ignored, and so are comments under posts from before the bot stored them.
 - DeepL gets the thread as `context`, which is not billed and resolves short references such as "the tomato" meaning the Pomodoro technique. A direct comment sends the post it replies to. A reply to another comment sends the channel post and that comment, because Telegram leaves the post out of nested replies.
-- The picture is HTML (`src/thread-image.ts`) rendered by Cloudflare Browser Rendering (`src/browser.ts`). It reuses a kept-alive browser session, because the plan limits how many new browsers start per minute. A render takes about 1 to 4.5 seconds. It shows the newest 30 comments and clips long texts so the image stays within Telegram's photo limits. Times are Kyiv time.
+- The picture is drawn inside the Worker by a small Rust renderer compiled to WASM (`render/`, called from `src/render.ts`). Workers Free allows 10 ms of CPU per request, so it does only what this picture needs: wrap text, copy cached glyphs, emoji and profile photos onto a canvas, and write a fast PNG. Fonts are parsed and common glyphs cached while the Worker starts, which has its own 1-second limit. Measured on Workers Free on 2026-11-20, a render took a median of 6 ms of CPU (max 24 ms), and 80 of 80 renders succeeded under load. General-purpose renderers did not fit: Browser Rendering took 1 to 4.5 seconds, and satori with resvg took 540 to 800 ms of CPU and was killed with error 1102 in bursts.
+- The picture shows the newest 30 comments and clips long texts so it stays within Telegram's photo limits. Times are Kyiv time. Fonts are Noto Sans cut down to Latin and Cyrillic. About 300 common emoji are built in (`render/assets/emoji.txt`). Others are left out, and a skin tone falls back to the default emoji. `bun scripts/emoji-atlas.ts` regenerates the emoji set and needs ImageMagick.
 - Translated comments are stored in `thread_comments` so the picture can be redrawn. Profile photos are cached in `profiles` for a week. A version counter on each thread makes requests that run at once keep redrawing until the picture shows the latest comment.
 - Posts and comments that are mostly Latin script (over 80%) are skipped. So are messages that are not Ukrainian by the original Cyrillic heuristic (`src/language.ts`). Text-less messages and messages older than `MESSAGE_MAX_AGE_SECONDS` (default 300) are skipped too.
 - `/start` in any chat replies "Bot is running!".
 - Only requests that carry the webhook secret in `X-Telegram-Bot-Api-Secret-Token` are processed. Everything else gets 401.
-- Each post is claimed in D1 (`posts` table) before translating, so a redelivered update never posts twice. Network errors, 429 and 5xx from DeepL or Telegram are retried in-request up to 3 times, honoring `Retry-After` and Telegram's `retry_after` up to 5 seconds. If retries run out, the claim is released and the Worker answers 503, so Telegram redelivers the update. A failed render (for example the browser rate limit) is transient too. Permanent errors (other 4xx, such as DeepL quota 456) are recorded as `failed` with the error and acknowledged with 200.
+- Each post is claimed in D1 (`posts` table) before translating, so a redelivered update never posts twice. Network errors, 429 and 5xx from DeepL or Telegram are retried in-request up to 3 times, honoring `Retry-After` and Telegram's `retry_after` up to 5 seconds. If retries run out, the claim is released and the Worker answers 503, so Telegram redelivers the update. Permanent errors (other 4xx, such as DeepL quota 456, or a render failure) are recorded as `failed` with the error and acknowledged with 200.
 
 ## Development
 
+Needs Bun and Rust (rustup installs the version and the `wasm32-unknown-unknown` target pinned in `render/rust-toolchain.toml`).
+
 ```sh
 bun install
-bun run check   # wrangler types --check, then tsc
-bun run test    # Vitest inside workerd with a local D1
+bun run check   # wrangler types --check, tsc, and the renderer's Rust tests
+bun run test    # builds the WASM renderer, then Vitest inside workerd with a local D1
 cp .dev.vars.example .dev.vars && bun run dev
 ```
+
+`dev`, `test` and `deploy` rebuild `src/thread-render.wasm` from `render/` first. The file is not committed.
 
 ## Deploy
 
@@ -72,6 +77,11 @@ Rollback: `bun run webhook delete` removes the webhook, after which a polling bo
 
 - Edited and deleted comments are not reflected, because the webhook only subscribes to new messages.
 - The text in the picture cannot be selected or searched in Telegram.
+- Text is laid out without kerning or complex-script shaping. That suits English and Ukrainian.
 - `/start@otherbot` also triggers the reply, because the bot's username is not checked.
 - Rows in `posts`, `thread_posts`, `thread_comments` and `profiles` are never pruned.
 - If the D1 write that marks a post `done` fails after Telegram accepted the reply, a later redelivery (after the 60-second claim lease) could send the thread picture again.
+
+## Credits
+
+Emoji graphics are from [Twemoji](https://github.com/jdecked/twemoji), © Twitter and other contributors, licensed under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). Noto Sans is licensed under the SIL Open Font License 1.1 (`render/assets/OFL.txt`).
