@@ -5,6 +5,9 @@ export interface Message {
   date: number;
   chat: { id: number; type: string };
   sender_chat?: { id: number };
+  from?: { id: number; is_bot: boolean };
+  message_thread_id?: number;
+  reply_to_message?: { message_id: number; text?: string; caption?: string };
   text?: string;
   caption?: string;
   entities?: { type: string; offset: number; length: number }[];

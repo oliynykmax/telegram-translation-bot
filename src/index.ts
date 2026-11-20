@@ -1,12 +1,12 @@
 import { translateToEnglish } from "./deepl";
 import { isEnglish, isUkrainian } from "./language";
-import { claimPost, releasePost, settlePost } from "./posts";
+import { claimPost, releasePost, rememberThreadPost, settlePost, threadPostText } from "./posts";
 import { isStartCommand, parseMessage, reply, type Message } from "./telegram";
 import type { Deps } from "./upstream";
 
 export const WEBHOOK_PATH = "/telegram/webhook";
 export const START_REPLY =
-  "Bot is running! I will automatically translate Ukrainian channel posts to English in the comments.";
+  "Bot is running! I will automatically translate Ukrainian channel posts and their comments to English.";
 
 const liveDeps: Deps = {
   fetch: (input, init) => fetch(input, init),
@@ -27,7 +27,13 @@ async function secretMatches(provided: string | null, expected: string): Promise
   return crypto.subtle.timingSafeEqual(a, b);
 }
 
-async function translatePost(env: Env, deps: Deps, message: Message, source: string) {
+async function translatePost(
+  env: Env,
+  deps: Deps,
+  message: Message,
+  source: string,
+  context: string | undefined,
+) {
   const ids = { chat_id: message.chat.id, message_id: message.message_id };
   const claim = await claimPost(env.DB, message.chat.id, message.message_id, deps.now());
   if (!claim.claimed) {
@@ -35,7 +41,7 @@ async function translatePost(env: Env, deps: Deps, message: Message, source: str
     return claim.state === "pending" ? text(503, "in progress") : text(200, "duplicate");
   }
 
-  const translated = await translateToEnglish(deps, env.DEEPL_API_KEY, source);
+  const translated = await translateToEnglish(deps, env.DEEPL_API_KEY, source, context);
   const sent = translated.ok
     ? await reply(deps, env.TELEGRAM_BOT_TOKEN, message, translated.value)
     : translated;
@@ -71,13 +77,15 @@ async function handleMessage(env: Env, deps: Deps, message: Message): Promise<Re
 
   const channelId = Number(env.CHANNEL_ID);
   const groupId = Number(env.DISCUSSION_GROUP_ID);
-  if (
-    message.chat.type !== "supergroup" ||
-    message.chat.id !== groupId ||
-    message.sender_chat?.id !== channelId
-  ) {
+  if (message.chat.type !== "supergroup" || message.chat.id !== groupId) {
     return text(200, "ignored");
   }
+  const isPost = message.sender_chat?.id === channelId;
+  const isComment =
+    !isPost &&
+    !message.from?.is_bot &&
+    (message.message_thread_id !== undefined || message.reply_to_message !== undefined);
+  if (!isPost && !isComment) return text(200, "ignored");
 
   const maxAge = Number(env.MESSAGE_MAX_AGE_SECONDS);
   if (deps.now() - message.date > maxAge) {
@@ -87,10 +95,24 @@ async function handleMessage(env: Env, deps: Deps, message: Message): Promise<Re
 
   const source = message.text ?? message.caption;
   if (!source) return text(200, "no text");
+  if (isPost) await rememberThreadPost(env.DB, groupId, message.message_id, source, deps.now());
   if (isEnglish(source)) return text(200, "english");
   if (!isUkrainian(source)) return text(200, "not ukrainian");
 
-  return translatePost(env, deps, message, source);
+  const context = isComment ? await commentContext(env.DB, message) : undefined;
+  return translatePost(env, deps, message, source, context);
+}
+
+// A direct comment replies to the post itself. A nested one replies to another comment,
+// and Telegram leaves the post out, so it comes from thread_posts.
+async function commentContext(db: D1Database, message: Message): Promise<string | undefined> {
+  const parent = message.reply_to_message;
+  const parentText = parent?.text ?? parent?.caption;
+  const threadId = message.message_thread_id;
+  if (threadId === undefined || parent?.message_id === threadId) return parentText;
+  const post = await threadPostText(db, message.chat.id, threadId);
+  if (!post) return parentText;
+  return parentText ? `Post: ${post}\nComment: ${parentText}` : post;
 }
 
 export async function handleRequest(request: Request, env: Env, deps: Deps): Promise<Response> {

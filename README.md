@@ -1,11 +1,12 @@
 # Telegram Channel Translation Bot
 
-Translates Ukrainian channel posts to English with DeepL and posts the translation as a comment under the post in the channel's linked discussion group. It runs as the Cloudflare Worker `tg-translator` at `https://tg-translator.oliinyk.dev`, driven by a Telegram webhook.
+Translates Ukrainian channel posts and their comments to English with DeepL. Each translation is posted as a reply in the channel's linked discussion group. It runs as the Cloudflare Worker `tg-translator` at `https://tg-translator.oliinyk.dev`, driven by a Telegram webhook.
 
 ## Behavior
 
 - Telegram auto-forwards each channel post into the discussion group. When a message there comes from `CHANNEL_ID`, the Worker translates its text or caption (`UK` to `EN-US`) and replies to it.
-- Posts that are mostly Latin script (over 80%) are skipped. So are posts that are not Ukrainian by the original Cyrillic heuristic (`src/language.ts`). Text-less posts and posts older than `MESSAGE_MAX_AGE_SECONDS` (default 300) are skipped too.
+- Comments are translated too. A comment is any message in the discussion group that is not from the channel or a bot and sits in a post's comment thread (`message_thread_id` or `reply_to_message` is set). DeepL gets the thread as `context`, which is not billed and resolves short references such as "the tomato" meaning the Pomodoro technique. A direct comment sends the post it replies to. A reply to another comment sends the channel post and that comment, because Telegram leaves the post out of nested replies. Channel post text is kept in the `thread_posts` table for this. Comment text is never stored. The translation replies to the comment. Plain group messages outside a thread are ignored.
+- Posts and comments that are mostly Latin script (over 80%) are skipped. So are messages that are not Ukrainian by the original Cyrillic heuristic (`src/language.ts`). Text-less messages and messages older than `MESSAGE_MAX_AGE_SECONDS` (default 300) are skipped too.
 - `/start` in any chat replies "Bot is running!".
 - Only requests that carry the webhook secret in `X-Telegram-Bot-Api-Secret-Token` are processed. Everything else gets 401.
 - Each post is claimed in D1 (`posts` table) before translating, so a redelivered update never posts twice. Network errors, 429 and 5xx from DeepL or Telegram are retried in-request up to 3 times, honoring `Retry-After` and Telegram's `retry_after` up to 5 seconds. If retries run out, the claim is released and the Worker answers 503, so Telegram redelivers the update. Permanent errors (other 4xx, such as DeepL quota 456 or a reply over Telegram's 4096-character limit) are recorded as `failed` with the error and acknowledged with 200.
@@ -29,6 +30,8 @@ Prerequisites: Wrangler logged in to the account that owns `oliinyk.dev`, and th
    bunx wrangler d1 create tg-translator
    bunx wrangler d1 migrations apply tg-translator --remote
    ```
+
+   Run the `migrations apply` command again after pulling a change that adds a migration.
 
 2. Set secrets. Each command prompts for the value, so nothing lands in shell history. Generate the webhook secret with `openssl rand -hex 32`. Telegram allows `A-Z a-z 0-9 _ -`, up to 256 characters.
 
@@ -66,5 +69,5 @@ Rollback: `bun run webhook delete` removes the webhook, after which a polling bo
 
 - Translations longer than 4096 characters are not split. Telegram rejects them and the post is recorded as `failed`, as the Python bot also failed to send them.
 - `/start@otherbot` also triggers the reply, because the bot's username is not checked.
-- Rows in `posts` are never pruned. Each is a few dozen bytes per channel post.
+- Rows in `posts` and `thread_posts` are never pruned. A `posts` row is a few dozen bytes per translated message, and a `thread_posts` row holds one channel post's text.
 - If the D1 write that marks a post `done` fails after Telegram accepted the reply, a later redelivery (after the 60-second claim lease) could post the translation again.
