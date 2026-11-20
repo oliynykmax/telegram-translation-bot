@@ -1,6 +1,12 @@
 export {};
 
 const WEBHOOK_URL = "https://tg-translator.oliinyk.dev/telegram/webhook";
+// Shown on the bot's profile (at most 120 characters) and in an empty chat (at most 512).
+const SHORT_DESCRIPTION =
+  "Translates Neuromax posts and comments to English. Channel members can DM me to translate.";
+const DESCRIPTION = `I translate Ukrainian posts in the Neuromax channel and their comments to English, as one picture per post that updates as people comment.
+
+Members of the channel or its chat can also message me directly: I translate any language to English, and English to Ukrainian.`;
 const [command = "info", ...flags] = process.argv.slice(2);
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -26,8 +32,11 @@ if (command === "info") {
     allowed_updates: ["message"],
     drop_pending_updates: flags.includes("--drop-pending"),
   });
+} else if (command === "describe") {
+  await call("setMyShortDescription", { short_description: SHORT_DESCRIPTION });
+  await call("setMyDescription", { description: DESCRIPTION });
 } else if (command === "delete") {
   await call("deleteWebhook", { drop_pending_updates: false });
 } else {
-  throw new Error("Usage: bun run webhook [info|set [--drop-pending]|delete]");
+  throw new Error("Usage: bun run webhook [info|set [--drop-pending]|describe|delete]");
 }

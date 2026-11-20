@@ -1,10 +1,11 @@
-import { translateToEnglish } from "./deepl";
+import { translate } from "./deepl";
 import { isEnglish, isUkrainian } from "./language";
 import { renderPng } from "./render";
 import { claimPost, releasePost, settlePost } from "./posts";
-import { authorOf, isStartCommand, parseMessage, reply, type Message } from "./telegram";
+import { authorOf, isMember, isStartCommand, parseMessage, reply, type Message } from "./telegram";
 import { syncThreadPhoto } from "./thread-photo";
 import {
+  getProfiles,
   getThread,
   rememberName,
   rememberThreadPost,
@@ -16,7 +17,12 @@ import type { Deps, Upstream } from "./upstream";
 
 export const WEBHOOK_PATH = "/telegram/webhook";
 export const START_REPLY =
-  "Bot is running! I translate Ukrainian channel posts and their comments to English, as one picture per post that updates as people comment.";
+  "Hi! I translate Ukrainian channel posts and their comments to English, as one picture per post that updates as people comment.\n\nChannel members can also message me here: I translate any language to English, and English to Ukrainian.";
+export const DM_HINT = "Send me a text message and I'll translate it.";
+export const DM_TOO_LONG = "That message is too long. Please send at most 2,000 characters at a time.";
+const DM_MAX_CHARS = 2000;
+const notMember = (channel: string) =>
+  `Sorry, translating messages is only for members of ${channel}. Join it, then send your message again.`;
 
 const liveDeps: Deps = {
   fetch: (input, init) => fetch(input, init),
@@ -107,7 +113,7 @@ async function handlePost(env: Env, deps: Deps, message: Message, source: string
   }
   const thread = (await getThread(env.DB, chatId, message.message_id))!;
   return updateThread(env, deps, message, thread, "post", async () => {
-    const translated = await translateToEnglish(deps, env.DEEPL_API_KEY, source);
+    const translated = await translate(deps, env.DEEPL_API_KEY, source, { source: "UK", target: "EN-US" });
     if (!translated.ok) return translated;
     await setTranslation(env.DB, thread, translated.value);
     return { ok: true, value: undefined };
@@ -143,12 +149,11 @@ async function handleComment(env: Env, deps: Deps, message: Message, source: str
   return updateThread(env, deps, message, thread, "comment", async () => {
     let english = source;
     if (ukrainian) {
-      const translated = await translateToEnglish(
-        deps,
-        env.DEEPL_API_KEY,
-        source,
-        commentContext(message, thread),
-      );
+      const translated = await translate(deps, env.DEEPL_API_KEY, source, {
+        source: "UK",
+        target: "EN-US",
+        context: commentContext(message, thread),
+      });
       if (!translated.ok) return translated;
       english = translated.value;
     }
@@ -166,12 +171,70 @@ function commentContext(message: Message, thread: Thread): string | undefined {
   return parentText ? `Post: ${thread.text}\nComment: ${parentText}` : thread.text;
 }
 
-async function handleMessage(env: Env, deps: Deps, message: Message): Promise<Response> {
-  if (isStartCommand(message)) {
-    const sent = await reply(deps, env.TELEGRAM_BOT_TOKEN, message, START_REPLY);
-    if (!sent.ok) log("start_reply_failed", { detail: sent.detail });
-    return sent.ok || !sent.transient ? text(200, "start") : text(503, "retry");
+/** Replies with a fixed text. Only a transient failure asks Telegram to redeliver. */
+async function answer(env: Env, deps: Deps, message: Message, body: string, label: string) {
+  const sent = await reply(deps, env.TELEGRAM_BOT_TOKEN, message, body);
+  if (!sent.ok) log("reply_failed", { label, detail: sent.detail });
+  return sent.ok || !sent.transient ? text(200, label) : text(503, "retry");
+}
+
+/** Translates a direct message for members of the channel or its discussion group. */
+async function handlePrivate(env: Env, deps: Deps, message: Message): Promise<Response> {
+  const userId = message.from?.id;
+  if (userId === undefined) return text(200, "ignored");
+  const [channel, group] = await Promise.all([
+    isMember(deps, env.TELEGRAM_BOT_TOKEN, Number(env.CHANNEL_ID), userId),
+    isMember(deps, env.TELEGRAM_BOT_TOKEN, Number(env.DISCUSSION_GROUP_ID), userId),
+  ]);
+  if (!channel.ok || !group.ok) {
+    log("membership_retry", { detail: !channel.ok ? channel.detail : !group.ok ? group.detail : "" });
+    return text(503, "retry");
   }
+  if (!channel.value && !group.value) {
+    log("dm_refused", { user_id: userId });
+    const channelId = Number(env.CHANNEL_ID);
+    const name = (await getProfiles(env.DB, [channelId])).get(channelId)?.name;
+    return answer(env, deps, message, notMember(name ?? "the channel"), "not a member");
+  }
+
+  const source = message.text ?? message.caption;
+  if (!source) return answer(env, deps, message, DM_HINT, "no text");
+  if ([...source].length > DM_MAX_CHARS) return answer(env, deps, message, DM_TOO_LONG, "too long");
+
+  const ids = { chat_id: message.chat.id, message_id: message.message_id };
+  const claim = await claimPost(env.DB, message.chat.id, message.message_id, deps.now());
+  if (!claim.claimed) return claim.state === "pending" ? text(503, "in progress") : text(200, "duplicate");
+
+  const translated = await translate(deps, env.DEEPL_API_KEY, source, {
+    target: isEnglish(source) ? "UK" : "EN-US",
+  });
+  const sent = translated.ok
+    ? await reply(deps, env.TELEGRAM_BOT_TOKEN, message, translated.value)
+    : translated;
+  if (sent.ok) {
+    await settlePost(env.DB, message.chat.id, message.message_id, deps.now(), {
+      state: "done",
+      replyMessageId: sent.value,
+    });
+    log("dm_translated", ids);
+    return text(200, "translated");
+  }
+  if (sent.transient) {
+    await releasePost(env.DB, message.chat.id, message.message_id);
+    return text(503, "retry");
+  }
+  const stage = translated.ok ? "telegram" : "deepl";
+  await settlePost(env.DB, message.chat.id, message.message_id, deps.now(), {
+    state: "failed",
+    error: `${stage}: ${sent.detail}`,
+  });
+  log("dm_failed", { ...ids, stage, detail: sent.detail });
+  return text(200, "failed");
+}
+
+async function handleMessage(env: Env, deps: Deps, message: Message): Promise<Response> {
+  if (isStartCommand(message)) return answer(env, deps, message, START_REPLY, "start");
+  if (message.chat.type === "private") return handlePrivate(env, deps, message);
 
   const groupId = Number(env.DISCUSSION_GROUP_ID);
   if (message.chat.type !== "supergroup" || message.chat.id !== groupId) {

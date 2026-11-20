@@ -1,6 +1,6 @@
 import { applyD1Migrations, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
-import { handleRequest, START_REPLY, WEBHOOK_PATH } from "../src/index";
+import { DM_HINT, DM_TOO_LONG, handleRequest, START_REPLY, WEBHOOK_PATH } from "../src/index";
 import { isEnglish, isUkrainian } from "../src/language";
 import type { RenderInput } from "../src/thread-image";
 import type { Deps } from "../src/upstream";
@@ -55,6 +55,7 @@ const healthyRoute: Route = (url, body) => {
   if (url.includes("deepl.com")) return json({ translations: [{ text: `EN(${body.text[0]})` }] });
   if (url.includes("/getChat?")) return json({ ok: true, result: { id: CHANNEL } });
   if (url.includes("/getUserProfilePhotos?")) return json({ ok: true, result: { total_count: 0, photos: [] } });
+  if (url.includes("/getChatMember?")) return json({ ok: true, result: { status: "member" } });
   return json({ ok: true, result: { message_id: 777 } });
 };
 
@@ -384,6 +385,87 @@ describe("/start", () => {
       text: START_REPLY,
       reply_parameters: { message_id: 10 },
     });
+  });
+});
+
+describe("direct messages", () => {
+  const dm = (text?: string, from = 77) => ({
+    update_id: 5,
+    message: {
+      message_id: 300,
+      date: NOW,
+      chat: { id: from, type: "private" },
+      from: { id: from, is_bot: false, first_name: "Ira" },
+      ...(text === undefined ? { sticker: {} } : { text }),
+    },
+  });
+  const membership = (statuses: Record<string, string | Response>): Route => (url, body) => {
+    if (!url.includes("/getChatMember?")) return healthyRoute(url, body);
+    const chat = new URL(url).searchParams.get("chat_id")!;
+    const status = statuses[chat] ?? "left";
+    return typeof status === "string" ? json({ ok: true, result: { status } }) : status;
+  };
+
+  it("translates a member's message to English and answers in the chat", async () => {
+    const fake = fakeDeps(healthyRoute);
+    expect((await send(dm(UKRAINIAN), fake.deps)).status).toBe(200);
+    expect(fake.calls.filter((c) => c.url.includes("/getChatMember?")).map((c) => new URL(c.url).searchParams.get("user_id"))).toEqual(["77", "77"]);
+    expect(fake.deepl()[0].body).toEqual({ text: [UKRAINIAN], target_lang: "EN-US" });
+    expect(fake.sent()[0].body).toEqual({ chat_id: 77, text: `EN(${UKRAINIAN})` });
+    expect((await postRow(300))?.state).toBe("done");
+  });
+
+  it("translates English to Ukrainian", async () => {
+    const fake = fakeDeps(healthyRoute);
+    await send(dm("Good morning, how are you?"), fake.deps);
+    expect(fake.deepl()[0].body.target_lang).toBe("UK");
+  });
+
+  it("accepts members of the discussion group who are not in the channel", async () => {
+    const fake = fakeDeps(membership({ [String(GROUP)]: "member" }));
+    await send(dm(UKRAINIAN), fake.deps);
+    expect(fake.deepl()).toHaveLength(1);
+  });
+
+  it.each([
+    ["users who left", { [String(CHANNEL)]: "left", [String(GROUP)]: "kicked" }],
+    ["users Telegram has never seen in either chat", {
+      [String(CHANNEL)]: json({ ok: false, error_code: 400, description: "Bad Request: user not found" }, 400),
+      [String(GROUP)]: json({ ok: false, error_code: 400, description: "Bad Request: user not found" }, 400),
+    }],
+  ])("refuses %s without calling DeepL", async (_, statuses) => {
+    await send(channelPost({ text: "English post" }));
+    const fake = fakeDeps(membership(statuses));
+    expect((await send(dm(UKRAINIAN), fake.deps)).status).toBe(200);
+    expect(fake.deepl()).toHaveLength(0);
+    expect(fake.sent()[0].body.text).toBe(
+      "Sorry, translating messages is only for members of Neuromax. Join it, then send your message again.",
+    );
+  });
+
+  it("asks for redelivery when membership can't be checked", async () => {
+    const fake = fakeDeps(membership({ [String(CHANNEL)]: new Response("down", { status: 502 }), [String(GROUP)]: "member" }));
+    expect((await send(dm(UKRAINIAN), fake.deps)).status).toBe(503);
+    expect(fake.deepl()).toHaveLength(0);
+    expect(fake.sent()).toHaveLength(0);
+  });
+
+  it.each([
+    ["messages without text", undefined, DM_HINT],
+    ["messages over 2,000 characters", "ї".repeat(2001), DM_TOO_LONG],
+  ])("explains instead of translating %s", async (_, text, expected) => {
+    const fake = fakeDeps(healthyRoute);
+    await send(dm(text), fake.deps);
+    expect(fake.deepl()).toHaveLength(0);
+    expect(fake.sent()[0].body.text).toBe(expected);
+  });
+
+  it("does not answer twice when Telegram redelivers", async () => {
+    const fake = fakeDeps(healthyRoute);
+    await send(dm(UKRAINIAN), fake.deps);
+    await send(dm(UKRAINIAN), fake.deps);
+    expect(fake.deepl()).toHaveLength(1);
+    expect(fake.sent()).toHaveLength(1);
   });
 });
 
