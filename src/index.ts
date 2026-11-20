@@ -59,17 +59,25 @@ async function updateThread(
     return claim.state === "pending" ? text(503, "in progress") : text(200, "duplicate");
   }
 
+  const started = Date.now();
   const updated = await update();
+  const translated = Date.now();
   const synced = updated.ok
     ? await syncThreadPhoto(env, deps, thread.chatId, thread.postId)
     : updated;
+  const timing = {
+    // message.date has 1-second resolution, so this is Telegram's delivery delay give or take a second.
+    delivery_lag_s: Math.floor(started / 1000) - message.date,
+    translate_ms: translated - started,
+    photo_ms: Date.now() - translated,
+  };
 
   if (synced.ok) {
     await settlePost(env.DB, message.chat.id, message.message_id, deps.now(), {
       state: "done",
       replyMessageId: synced.value ?? 0,
     });
-    log("thread_updated", { ...ids, photo_message_id: synced.value });
+    log("thread_updated", { ...ids, photo_message_id: synced.value, ...timing });
     return text(200, "translated");
   }
   const stage = updated.ok ? "photo" : "deepl";
