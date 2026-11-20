@@ -51,6 +51,18 @@ function channelPost(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function comment(overrides: Record<string, unknown> = {}) {
+  return {
+    message_id: 50,
+    sender_chat: undefined,
+    is_automatic_forward: undefined,
+    from: { id: 5, is_bot: false },
+    message_thread_id: 42,
+    reply_to_message: { message_id: 42, text: "Порада дня: спробуйте техніку «помідора»." },
+    ...overrides,
+  };
+}
+
 function webhook(update: unknown, secret: string | null = env.TELEGRAM_WEBHOOK_SECRET) {
   const headers = new Headers({ "Content-Type": "application/json" });
   if (secret !== null) headers.set("X-Telegram-Bot-Api-Secret-Token", secret);
@@ -68,7 +80,7 @@ const postRow = (messageId = 42) =>
 
 beforeEach(async () => {
   await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
-  await env.DB.exec("DELETE FROM posts");
+  await env.DB.exec("DELETE FROM posts; DELETE FROM thread_posts;");
 });
 
 describe("language detection matches the Python bot", () => {
@@ -163,7 +175,9 @@ describe("translation", () => {
     ["non-Ukrainian posts", { text: "Hola, ¿qué tal? Buenos días." }],
     ["posts without text", { text: undefined }],
     ["posts older than the age window", { date: NOW - 301 }],
-    ["messages from other senders", { sender_chat: undefined, from: { id: 5 } }],
+    ["group messages outside a comment thread", { sender_chat: undefined, from: { id: 5, is_bot: false } }],
+    ["comments from bots", { ...comment(), from: { id: 6, is_bot: true } }],
+    ["English comments", { ...comment(), text: "Great post, thanks for sharing!" }],
     ["other chats", { chat: { id: -100999, type: "supergroup" } }],
   ])("skips %s", async (_, overrides) => {
     const fake = fakeDeps(healthyRoute);
@@ -171,6 +185,44 @@ describe("translation", () => {
     expect(res.status).toBe(200);
     expect(fake.calls).toHaveLength(0);
     expect(await postRow()).toBeNull();
+  });
+
+  it.each([
+    ["a direct comment under a post", comment()],
+    ["a reply to another comment", comment({ reply_to_message: { message_id: 49, text: "А запис стріму буде?" } })],
+  ])("translates %s and replies to that comment", async (_, overrides) => {
+    const fake = fakeDeps(healthyRoute);
+    const res = await handleRequest(webhook(channelPost(overrides)), env, fake.deps);
+    expect(res.status).toBe(200);
+    expect(fake.deepl()[0].body.context).toBe(
+      (overrides.reply_to_message as { text: string }).text,
+    );
+    expect(fake.telegram()[0].body).toEqual({
+      chat_id: GROUP,
+      text: `EN(${UKRAINIAN})`,
+      reply_parameters: { message_id: 50 },
+    });
+    expect(await postRow(50)).toEqual({ state: "done", reply_message_id: 777, error: null });
+  });
+
+  it("gives a nested reply both the channel post and the comment it answers as context", async () => {
+    const post = "Ділюся сетапом: клавіатура з коричневими світчами.";
+    await handleRequest(webhook(channelPost({ text: post })), env, fakeDeps(healthyRoute).deps);
+
+    const fake = fakeDeps(healthyRoute);
+    const nested = comment({ text: "Сині взагалі зло", reply_to_message: { message_id: 49, text: "Та ні, це ж не сині" } });
+    await handleRequest(webhook(channelPost(nested)), env, fake.deps);
+    expect(fake.deepl()[0].body.context).toBe(`Post: ${post}\nComment: Та ні, це ж не сині`);
+  });
+
+  it("remembers English channel posts so their Ukrainian comments still get the post as context", async () => {
+    const post = "My study setup: brown switches.";
+    await handleRequest(webhook(channelPost({ text: post })), env, fakeDeps(healthyRoute).deps);
+
+    const fake = fakeDeps(healthyRoute);
+    const nested = comment({ reply_to_message: { message_id: 49, text: "Та ні, це ж не сині" } });
+    await handleRequest(webhook(channelPost(nested)), env, fake.deps);
+    expect(fake.deepl()[0].body.context).toBe(`Post: ${post}\nComment: Та ні, це ж не сині`);
   });
 
   it("ignores edited messages and non-message updates", async () => {

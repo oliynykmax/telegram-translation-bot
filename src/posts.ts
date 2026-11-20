@@ -53,3 +53,26 @@ export async function releasePost(db: D1Database, chatId: number, messageId: num
     .bind(chatId, messageId)
     .run();
 }
+
+export async function rememberThreadPost(
+  db: D1Database,
+  chatId: number,
+  messageId: number,
+  text: string,
+  now: number,
+) {
+  await db
+    .prepare(
+      "INSERT INTO thread_posts (chat_id, message_id, text, created_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING",
+    )
+    .bind(chatId, messageId, text, now)
+    .run();
+}
+
+export async function threadPostText(db: D1Database, chatId: number, messageId: number) {
+  const row = await db
+    .prepare("SELECT text FROM thread_posts WHERE chat_id = ?1 AND message_id = ?2")
+    .bind(chatId, messageId)
+    .first<{ text: string }>();
+  return row?.text;
+}

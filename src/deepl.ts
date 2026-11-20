@@ -9,11 +9,12 @@ export async function translateToEnglish(
   deps: Deps,
   apiKey: string,
   text: string,
+  context?: string,
 ): Promise<Upstream<string>> {
   const result = await fetchWithRetry(deps, endpoint(apiKey), {
     method: "POST",
     headers: { Authorization: `DeepL-Auth-Key ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ text: [text], source_lang: "UK", target_lang: "EN-US" }),
+    body: JSON.stringify({ text: [text], context, source_lang: "UK", target_lang: "EN-US" }),
   });
   if (!result.ok) return result;
   const body = await result.value.json<{ translations?: { text?: string }[] }>();
