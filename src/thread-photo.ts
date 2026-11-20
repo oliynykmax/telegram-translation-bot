@@ -81,7 +81,9 @@ export async function syncThreadPhoto(
       return { ok: true, value: undefined };
     }
 
+    const renderStart = Date.now();
     const png = await renderThread(env, deps, thread);
+    const telegramStart = Date.now();
     if (!png.ok) {
       if (sending) await settlePhoto(env.DB, thread, null);
       return png;
@@ -97,6 +99,15 @@ export async function syncThreadPhoto(
       photoId = thread.photoMessageId!;
     }
 
+    console.log(
+      JSON.stringify({
+        event: "photo_timing",
+        round,
+        method: sending ? "sendPhoto" : "editMessageMedia",
+        render_ms: telegramStart - renderStart,
+        telegram_ms: Date.now() - telegramStart,
+      }),
+    );
     const latest = await getThread(env.DB, chatId, postId);
     if (latest?.version === thread.version) break;
   }
