@@ -57,6 +57,29 @@ export async function reply(
 
 const api = (token: string, method: string) => `https://api.telegram.org/bot${token}/${method}`;
 
+/**
+ * Whether the user belongs to the chat. The bot must be an admin there. Telegram answers 400
+ * for users it has never seen in the chat, which also means "not a member".
+ */
+export async function isMember(
+  deps: Deps,
+  token: string,
+  chatId: number,
+  userId: number,
+): Promise<Upstream<boolean>> {
+  const query = new URLSearchParams({ chat_id: String(chatId), user_id: String(userId) });
+  const result = await fetchWithRetry(deps, `${api(token, "getChatMember")}?${query}`, {});
+  if (!result.ok) return result.transient ? result : { ok: true, value: false };
+  const body = await result.value.json<{ result?: { status?: string; is_member?: boolean } }>();
+  const status = body.result?.status;
+  const member =
+    status === "creator" ||
+    status === "administrator" ||
+    status === "member" ||
+    (status === "restricted" && body.result?.is_member === true);
+  return { ok: true, value: member };
+}
+
 /** Who a comment is shown as: the chat for anonymous admins and channel senders, else the user. */
 export function authorOf(message: Message): { id: number; name: string } {
   if (message.sender_chat) {

@@ -11,7 +11,8 @@ Translates Ukrainian channel posts and their comments to English with DeepL. Eac
 - The picture shows the newest 30 comments and clips long texts so it stays within Telegram's photo limits. Times are Kyiv time. Fonts are Noto Sans cut down to Latin and Cyrillic. About 300 common emoji are built in (`render/assets/emoji.txt`). Others are left out, and a skin tone falls back to the default emoji. `bun scripts/emoji-atlas.ts` regenerates the emoji set and needs ImageMagick.
 - Translated comments are stored in `thread_comments` so the picture can be redrawn. Profile photos are cached in `profiles` for a week. A version counter on each thread makes requests that run at once keep redrawing until the picture shows the latest comment.
 - Posts and comments that are mostly Latin script (over 80%) are skipped. So are messages that are not Ukrainian by the original Cyrillic heuristic (`src/language.ts`). Text-less messages and messages older than `MESSAGE_MAX_AGE_SECONDS` (default 300) are skipped too.
-- `/start` in any chat replies "Bot is running!".
+- Direct messages are translated for members of the channel or its discussion group, checked with `getChatMember` on every message (the bot is an admin in both). Text in Ukrainian or any language other than English becomes English, English becomes Ukrainian, and DeepL detects the source language. Others get a refusal that names the channel, and DeepL is not called. Messages without text get a hint, and messages over 2,000 characters are refused to protect the DeepL quota.
+- `/start` in any chat explains what the bot does.
 - Only requests that carry the webhook secret in `X-Telegram-Bot-Api-Secret-Token` are processed. Everything else gets 401.
 - Each post is claimed in D1 (`posts` table) before translating, so a redelivered update never posts twice. Network errors, 429 and 5xx from DeepL or Telegram are retried in-request up to 3 times, honoring `Retry-After` and Telegram's `retry_after` up to 5 seconds. If retries run out, the claim is released and the Worker answers 503, so Telegram redelivers the update. Permanent errors (other 4xx, such as DeepL quota 456, or a render failure) are recorded as `failed` with the error and acknowledged with 200.
 
@@ -54,6 +55,7 @@ Prerequisites: Wrangler logged in to the account that owns `oliinyk.dev`, and th
    `CHANNEL_ID` and `DISCUSSION_GROUP_ID` are the same values the Railway service used (for example `-1001234567890`). Keys ending in `:fx` use the DeepL Free endpoint. Others use DeepL Pro.
 
 3. `bun run deploy`, then check `curl https://tg-translator.oliinyk.dev/` prints `ok`.
+4. Set the bot's profile texts from `scripts/webhook.ts` with `TELEGRAM_BOT_TOKEN` exported: `bun run webhook describe`.
 
 ## Cutover from Railway
 
