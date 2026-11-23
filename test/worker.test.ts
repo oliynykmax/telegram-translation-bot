@@ -90,7 +90,7 @@ function comment(overrides: Record<string, unknown> = {}) {
 function webhook(update: unknown, secret: string | null = env.TELEGRAM_WEBHOOK_SECRET) {
   const headers = new Headers({ "Content-Type": "application/json" });
   if (secret !== null) headers.set("X-Telegram-Bot-Api-Secret-Token", secret);
-  return new Request(`https://tg-translator.oliinyk.dev${WEBHOOK_PATH}`, {
+  return new Request(`https://tg-translator.example.com${WEBHOOK_PATH}`, {
     method: "POST",
     headers,
     body: typeof update === "string" ? update : JSON.stringify(update),
