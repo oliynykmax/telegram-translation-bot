@@ -13,8 +13,11 @@ export interface Message {
   reply_to_message?: { message_id: number; text?: string; caption?: string };
   text?: string;
   caption?: string;
-  entities?: { type: string; offset: number; length: number }[];
+  entities?: Entity[];
+  caption_entities?: Entity[];
 }
+
+type Entity = { type: string; offset: number; length: number };
 
 /** Reads a new or edited message. An edited one always carries `edit_date`. */
 export function parseMessage(update: unknown): Message | undefined {
@@ -36,6 +39,28 @@ export function isStartCommand(message: Message): boolean {
   const command = message.entities?.find((e) => e.type === "bot_command" && e.offset === 0);
   if (!command || !message.text) return false;
   return message.text.slice(0, command.length).split("@")[0] === "/start";
+}
+
+/**
+ * Whether the message calls the bot on purpose: `@username` anywhere, or `/translate`
+ * (optionally `/translate@username`) at the start. Returns the text with that call removed.
+ */
+export function summons(message: Message, username: string): { rest: string } | undefined {
+  const text = message.text ?? message.caption;
+  const entities = message.text !== undefined ? message.entities : message.caption_entities;
+  if (!text || !entities) return undefined;
+  const name = username.toLowerCase();
+  // Entity offsets count UTF-16 code units, the same as JavaScript string indices.
+  const call = entities.find((e) => {
+    const value = text.slice(e.offset, e.offset + e.length).toLowerCase();
+    if (e.type === "mention") return value === `@${name}`;
+    if (e.type !== "bot_command" || e.offset !== 0) return false;
+    const [command, target] = value.split("@");
+    return command === "/translate" && (target === undefined || target === name);
+  });
+  if (!call) return undefined;
+  const rest = (text.slice(0, call.offset) + text.slice(call.offset + call.length)).trim();
+  return { rest };
 }
 
 export async function reply(

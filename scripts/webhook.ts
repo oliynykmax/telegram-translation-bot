@@ -6,7 +6,9 @@ const SHORT_DESCRIPTION =
   "Translates Neuromax posts and comments to English. Channel members can DM me to translate.";
 const DESCRIPTION = `I translate Ukrainian posts in the Neuromax channel and their comments to English, as one picture per post that updates as people comment.
 
-Members of the channel or its chat can also message me directly: I translate any language to English, and English to Ukrainian.`;
+Members of the channel or its chat can also message me directly: I translate any language to English, and English to Ukrainian.
+
+In a group, reply to a message with @neuromax_translate_bot or /translate to translate it.`;
 const [command = "info", ...flags] = process.argv.slice(2);
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -35,6 +37,9 @@ if (command === "info") {
 } else if (command === "describe") {
   await call("setMyShortDescription", { short_description: SHORT_DESCRIPTION });
   await call("setMyDescription", { description: DESCRIPTION });
+  await call("setMyCommands", {
+    commands: [{ command: "translate", description: "Translate the message you reply to, or the text after it" }],
+  });
 } else if (command === "delete") {
   await call("deleteWebhook", { drop_pending_updates: false });
 } else {

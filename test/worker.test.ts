@@ -1,6 +1,6 @@
 import { applyD1Migrations, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
-import { DM_HINT, DM_TOO_LONG, handleRequest, START_REPLY, WEBHOOK_PATH } from "../src/index";
+import { DM_HINT, DM_TOO_LONG, GROUP_HINT, handleRequest, START_REPLY, WEBHOOK_PATH } from "../src/index";
 import { isEnglish, isUkrainian } from "../src/language";
 import type { RenderInput } from "../src/thread-image";
 import type { Deps } from "../src/upstream";
@@ -544,6 +544,97 @@ describe("direct messages", () => {
     await send(dm(UKRAINIAN), fake.deps);
     await send(dm(UKRAINIAN), fake.deps);
     expect(fake.deepl()).toHaveLength(1);
+    expect(fake.sent()).toHaveLength(1);
+  });
+});
+
+describe("calling the bot in a group", () => {
+  const BOT = "@neuromax_translate_bot";
+  const called = (text: string, overrides: Record<string, unknown> = {}, offset = text.indexOf(BOT)) => ({
+    update_id: 6,
+    message: {
+      message_id: 400,
+      date: NOW,
+      chat: { id: GROUP, type: "supergroup" },
+      from: { id: 77, is_bot: false, first_name: "Ira" },
+      text,
+      entities: [{ type: "mention", offset, length: BOT.length }],
+      ...overrides,
+    },
+  });
+
+  it("translates the message it replies to and answers as a reply, outside any thread", async () => {
+    const fake = fakeDeps(healthyRoute);
+    const update = called(BOT, { reply_to_message: { message_id: 399, text: UKRAINIAN } });
+    expect((await send(update, fake.deps)).status).toBe(200);
+    expect(fake.deepl()[0].body).toEqual({ text: [UKRAINIAN], target_lang: "EN-US" });
+    expect(fake.sent()[0].body).toEqual({
+      chat_id: GROUP,
+      text: `EN(${UKRAINIAN})`,
+      reply_parameters: { message_id: 400 },
+    });
+    expect(fake.calls.filter((c) => c.url.includes("/getChatMember?"))).toHaveLength(0);
+    expect((await postRow(400))?.state).toBe("done");
+  });
+
+  it("translates the text written after the mention, and English to Ukrainian", async () => {
+    const fake = fakeDeps(healthyRoute);
+    await send(called(`${BOT} Good morning, everyone!`), fake.deps);
+    expect(fake.deepl()[0].body).toEqual({ text: ["Good morning, everyone!"], target_lang: "UK" });
+  });
+
+  it("does not add a call in a comment thread to the thread picture", async () => {
+    await send(channelPost());
+    const fake = fakeDeps(healthyRoute);
+    await send(called(`Переклади: ${BOT}`, { message_thread_id: 42, reply_to_message: { message_id: 42, text: UKRAINIAN } }), fake.deps);
+    expect(fake.deepl()[0].body.text).toEqual(["Переклади:"]);
+    expect(fake.renders).toHaveLength(0);
+  });
+
+  it("accepts /translate and /translate@bot", async () => {
+    for (const command of ["/translate", "/translate@Neuromax_Translate_Bot"]) {
+      const fake = fakeDeps(healthyRoute);
+      const update = called(`${command} Привіт`, {
+        message_id: command.length,
+        entities: [{ type: "bot_command", offset: 0, length: command.length }],
+      });
+      await send(update, fake.deps);
+      expect(fake.deepl()[0].body.text).toEqual(["Привіт"]);
+    }
+  });
+
+  it("ignores mentions of other bots and commands for them", async () => {
+    const fake = fakeDeps(healthyRoute);
+    await send(called("@other_bot Привіт", { entities: [{ type: "mention", offset: 0, length: 10 }] }), fake.deps);
+    await send(called("/translate@other_bot Привіт", { entities: [{ type: "bot_command", offset: 0, length: 20 }] }), fake.deps);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("explains how to use it when there is nothing to translate", async () => {
+    const fake = fakeDeps(healthyRoute);
+    await send(called(BOT), fake.deps);
+    expect(fake.deepl()).toHaveLength(0);
+    expect(fake.sent()[0].body.text).toBe(GROUP_HINT);
+  });
+
+  it("works in other groups for channel members only", async () => {
+    const other = { chat: { id: -500, type: "group" }, reply_to_message: { message_id: 1, text: UKRAINIAN } };
+    const member = fakeDeps(healthyRoute);
+    await send(called(BOT, other), member.deps);
+    expect(member.deepl()).toHaveLength(1);
+
+    const stranger = fakeDeps((url, body) =>
+      url.includes("/getChatMember?") ? json({ ok: true, result: { status: "left" } }) : healthyRoute(url, body),
+    );
+    await send(called(BOT, { ...other, message_id: 401 }), stranger.deps);
+    expect(stranger.deepl()).toHaveLength(0);
+    expect(stranger.sent()[0].body.text).toMatch(/^Sorry, translating messages is only for members/);
+  });
+
+  it("does not answer twice when Telegram redelivers", async () => {
+    const fake = fakeDeps(healthyRoute);
+    await send(called(`${BOT} Привіт`), fake.deps);
+    await send(called(`${BOT} Привіт`), fake.deps);
     expect(fake.sent()).toHaveLength(1);
   });
 });

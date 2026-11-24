@@ -8,7 +8,8 @@
   "routes": [{ "pattern": "tg-translator.oliinyk.dev", "custom_domain": true }],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "vars": {
-    "MESSAGE_MAX_AGE_SECONDS": "300"
+    "MESSAGE_MAX_AGE_SECONDS": "300",
+    "BOT_USERNAME": "neuromax_translate_bot"
   },
   "secrets": {
     "required": [
