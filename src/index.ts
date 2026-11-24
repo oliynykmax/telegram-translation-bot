@@ -2,7 +2,7 @@ import { translate } from "./deepl";
 import { isEnglish, isUkrainian } from "./language";
 import { renderPng } from "./render";
 import { claimPost, releasePost, settlePost } from "./posts";
-import { authorOf, isMember, isStartCommand, parseMessage, reply, type Message } from "./telegram";
+import { authorOf, isMember, isStartCommand, parseMessage, reply, summons, type Message } from "./telegram";
 import { syncThreadPhoto } from "./thread-photo";
 import {
   getProfiles,
@@ -17,9 +17,11 @@ import type { Deps, Upstream } from "./upstream";
 
 export const WEBHOOK_PATH = "/telegram/webhook";
 export const START_REPLY =
-  "Hi! I translate Ukrainian channel posts and their comments to English, as one picture per post that updates as people comment.\n\nChannel members can also message me here: I translate any language to English, and English to Ukrainian.";
+  "Hi! I translate Ukrainian channel posts and their comments to English, as one picture per post that updates as people comment.\n\nChannel members can also message me here: I translate any language to English, and English to Ukrainian.\n\nIn a group, reply to a message with @neuromax_translate_bot or /translate and I'll translate it. You can also write your text right after the mention.";
 export const DM_HINT = "Send me a text message and I'll translate it.";
 export const DM_TOO_LONG = "That message is too long. Please send at most 2,000 characters at a time.";
+export const GROUP_HINT =
+  "Reply to a message with my name to translate it, or write the text right after my name.";
 const DM_MAX_CHARS = 2000;
 const notMember = (channel: string) =>
   `Sorry, translating messages is only for members of ${channel}. Join it, then send your message again.`;
@@ -189,8 +191,11 @@ async function answer(env: Env, deps: Deps, message: Message, body: string, labe
   return sent.ok || !sent.transient ? text(200, label) : text(503, "retry");
 }
 
-/** Translates a direct message for members of the channel or its discussion group. */
-async function handlePrivate(env: Env, deps: Deps, message: Message): Promise<Response> {
+/**
+ * Checks that the sender belongs to the channel or its discussion group. Returns the response
+ * to send when they don't, or when membership can't be checked yet.
+ */
+async function refuseNonMember(env: Env, deps: Deps, message: Message): Promise<Response | undefined> {
   const userId = message.from?.id;
   if (userId === undefined) return text(200, "ignored");
   const [channel, group] = await Promise.all([
@@ -207,12 +212,45 @@ async function handlePrivate(env: Env, deps: Deps, message: Message): Promise<Re
     const name = (await getProfiles(env.DB, [channelId])).get(channelId)?.name;
     return answer(env, deps, message, notMember(name ?? "the channel"), "not a member");
   }
+  return undefined;
+}
 
+/** Translates a direct message for members of the channel or its discussion group. */
+async function handlePrivate(env: Env, deps: Deps, message: Message): Promise<Response> {
+  const refused = await refuseNonMember(env, deps, message);
+  if (refused) return refused;
   const source = message.text ?? message.caption;
   if (!source) return answer(env, deps, message, DM_HINT, "no text");
+  return translateAndReply(env, deps, message, source, "dm");
+}
+
+/**
+ * Translates a message that calls the bot by name or with /translate in a group: the text
+ * after the call, or else the message it replies to. In the discussion group everyone is a
+ * member already. Elsewhere the sender must belong to the channel or its group.
+ */
+async function handleSummons(env: Env, deps: Deps, message: Message, rest: string): Promise<Response> {
+  const parent = message.reply_to_message;
+  const source = rest || parent?.text || parent?.caption;
+  if (!source) return answer(env, deps, message, GROUP_HINT, "no text");
+  if (message.chat.id !== Number(env.DISCUSSION_GROUP_ID)) {
+    const refused = await refuseNonMember(env, deps, message);
+    if (refused) return refused;
+  }
+  return translateAndReply(env, deps, message, source, "summons");
+}
+
+/** Any language becomes English, and English becomes Ukrainian. Answers once per message. */
+async function translateAndReply(
+  env: Env,
+  deps: Deps,
+  message: Message,
+  source: string,
+  kind: "dm" | "summons",
+): Promise<Response> {
   if ([...source].length > DM_MAX_CHARS) return answer(env, deps, message, DM_TOO_LONG, "too long");
 
-  const ids = { chat_id: message.chat.id, message_id: message.message_id };
+  const ids = { kind, chat_id: message.chat.id, message_id: message.message_id };
   const claim = await claimPost(env.DB, message.chat.id, message.message_id, deps.now());
   if (!claim.claimed) return claim.state === "pending" ? text(503, "in progress") : text(200, "duplicate");
 
@@ -227,7 +265,7 @@ async function handlePrivate(env: Env, deps: Deps, message: Message): Promise<Re
       state: "done",
       replyMessageId: sent.value,
     });
-    log("dm_translated", ids);
+    log("on_demand_translated", ids);
     return text(200, "translated");
   }
   if (sent.transient) {
@@ -239,7 +277,7 @@ async function handlePrivate(env: Env, deps: Deps, message: Message): Promise<Re
     state: "failed",
     error: `${stage}: ${sent.detail}`,
   });
-  log("dm_failed", { ...ids, stage, detail: sent.detail });
+  log("on_demand_failed", { ...ids, stage, detail: sent.detail });
   return text(200, "failed");
 }
 
@@ -248,6 +286,12 @@ async function handleMessage(env: Env, deps: Deps, message: Message): Promise<Re
   if (isStartCommand(message) && !edited) return answer(env, deps, message, START_REPLY, "start");
   if (message.chat.type === "private") {
     return edited ? text(200, "edit ignored") : handlePrivate(env, deps, message);
+  }
+
+  const called = edited ? undefined : summons(message, env.BOT_USERNAME);
+  if (called && (message.chat.type === "group" || message.chat.type === "supergroup")) {
+    if (deps.now() - message.date > Number(env.MESSAGE_MAX_AGE_SECONDS)) return text(200, "too old");
+    return handleSummons(env, deps, message, called.rest);
   }
 
   const groupId = Number(env.DISCUSSION_GROUP_ID);
