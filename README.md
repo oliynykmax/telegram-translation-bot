@@ -1,6 +1,6 @@
 # Telegram Channel Translation Bot
 
-Translates Ukrainian channel posts and their comments to English with DeepL. Each post's thread is shown as one picture in the channel's linked discussion group: the translated post, then every comment with the writer's name and profile photo. The bot edits that picture in place as comments arrive or are edited. It runs as the Cloudflare Worker `tg-translator` at `https://tg-translator.oliinyk.dev`, driven by a Telegram webhook.
+Translates Ukrainian channel posts and their comments to English with DeepL. Each post's thread is shown as one picture in the channel's linked discussion group: the translated post, then every comment with the writer's name and profile photo. The bot edits that picture in place as comments arrive or are edited. It runs as the Cloudflare Worker `tg-translator`, driven by a Telegram webhook.
 
 ## Behavior
 
@@ -30,20 +30,11 @@ cp .dev.vars.example .dev.vars && bun run dev
 
 `dev`, `test` and `deploy` rebuild `src/thread-render.wasm` from `render/` first. The file is not committed.
 
-## Deploy
+## Deploy your own
 
-Prerequisites: Wrangler logged in to the account that owns `oliinyk.dev`, and the bot an admin of both the channel and the discussion group.
+Prerequisites: a Cloudflare account with Wrangler logged in (`bunx wrangler login`), Rust (the toolchain in `render/rust-toolchain.toml`), and the bot an admin of both the channel and the discussion group.
 
-1. Create the database and apply the schema. `wrangler d1 create` prints a `database_id`. Add it to the `d1_databases` entry in `wrangler.jsonc`.
-
-   ```sh
-   bunx wrangler d1 create tg-translator
-   bunx wrangler d1 migrations apply tg-translator --remote
-   ```
-
-   Run the `migrations apply` command again after pulling a change that adds a migration.
-
-2. Set secrets. Each command prompts for the value, so nothing lands in shell history. Generate the webhook secret with `openssl rand -hex 32`. Telegram allows `A-Z a-z 0-9 _ -`, up to 256 characters.
+1. Set secrets. Each command prompts for the value, so nothing lands in shell history. Generate the webhook secret with `openssl rand -hex 32`. Telegram allows `A-Z a-z 0-9 _ -`, up to 256 characters.
 
    ```sh
    bunx wrangler secret put TELEGRAM_BOT_TOKEN
@@ -55,8 +46,18 @@ Prerequisites: Wrangler logged in to the account that owns `oliinyk.dev`, and th
 
    `CHANNEL_ID` and `DISCUSSION_GROUP_ID` are the same values the Railway service used (for example `-1001234567890`). Keys ending in `:fx` use the DeepL Free endpoint. Others use DeepL Pro.
 
-3. `bun run deploy`, then check `curl https://tg-translator.oliinyk.dev/` prints `ok`.
+2. Deploy, then apply the schema. Wrangler creates the `tg-translator` D1 database on the first deploy.
+
+   ```sh
+   bun run deploy
+   bunx wrangler d1 migrations apply tg-translator --remote
+   ```
+
+   Run the `migrations apply` command again after pulling a change that adds a migration.
+
+3. Check that `curl https://tg-translator.<your-subdomain>.workers.dev/` prints `ok`. To use a custom domain on a zone in the same account, deploy with `bunx wrangler deploy --domain <hostname>`.
 4. Set the bot's profile texts from `scripts/webhook.ts` with `TELEGRAM_BOT_TOKEN` exported: `bun run webhook describe`.
+5. To deploy from GitHub Actions on every push to `main`, configure the `production` environment as described at the top of `.github/workflows/deploy.yml`. Every setting is in `.env.example`.
 
 ## Cutover from Railway
 
@@ -64,7 +65,7 @@ The previous version was a Python long-polling bot (`python main.py`) on Railway
 
 1. Check the bot's current mode. Put `TELEGRAM_BOT_TOKEN` in a gitignored `.env` or export it, then run `bun run webhook info`. An empty `url` means no webhook is set. The old bot polled, so that is the expected starting state.
 2. If the Railway service still exists, stop it in the Railway dashboard (or `railway down`). Once a webhook is set, Telegram rejects `getUpdates` with 409 Conflict, so a poller left running would only crash-loop.
-3. Point Telegram at the Worker. Export `TELEGRAM_WEBHOOK_SECRET` with the value stored in step 2 of Deploy, then:
+3. Point Telegram at the Worker. Export `TELEGRAM_WEBHOOK_SECRET` with the value stored in step 2 of Deploy and `WORKER_URL` with the Worker's public origin, then:
 
    ```sh
    bun run webhook set --drop-pending

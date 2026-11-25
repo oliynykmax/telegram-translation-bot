@@ -1,6 +1,7 @@
 export {};
 
-const WEBHOOK_URL = "https://tg-translator.oliinyk.dev/telegram/webhook";
+// Public origin of the deployed Worker, e.g. https://tg-translator.<your-subdomain>.workers.dev
+const WORKER_URL = process.env.WORKER_URL?.replace(/\/+$/, "");
 // Shown on the bot's profile (at most 120 characters) and in an empty chat (at most 512).
 const SHORT_DESCRIPTION =
   "Translates Neuromax posts and comments to English. Channel members can DM me to translate.";
@@ -26,10 +27,11 @@ async function call(method: string, body?: Record<string, unknown>) {
 if (command === "info") {
   await call("getWebhookInfo");
 } else if (command === "set") {
+  if (!WORKER_URL) throw new Error("Set WORKER_URL to the Worker's public origin");
   const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
   if (!secret) throw new Error("Set TELEGRAM_WEBHOOK_SECRET to the value stored with wrangler");
   await call("setWebhook", {
-    url: WEBHOOK_URL,
+    url: `${WORKER_URL}/telegram/webhook`,
     secret_token: secret,
     allowed_updates: ["message", "edited_message"],
     drop_pending_updates: flags.includes("--drop-pending"),

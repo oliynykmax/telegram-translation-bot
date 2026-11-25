@@ -4,8 +4,6 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-11-16",
   "compatibility_flags": ["nodejs_compat"],
-  "workers_dev": false,
-  "routes": [{ "pattern": "tg-translator.oliinyk.dev", "custom_domain": true }],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "vars": {
     "MESSAGE_MAX_AGE_SECONDS": "300",
@@ -24,7 +22,6 @@
     {
       "binding": "DB",
       "database_name": "tg-translator",
-      "database_id": "54bfda16-60cf-4222-bdfa-9ac2365203a5",
       "migrations_dir": "migrations"
     }
   ]
